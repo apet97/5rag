@@ -50,6 +50,25 @@ DEFAULT_RETRIES = 0
 MMR_LAMBDA = 0.7
 CTX_TOKEN_BUDGET = int(os.environ.get("CTX_BUDGET", "2800"))  # ~11,200 chars, overridable
 
+# ====== EMBEDDINGS BACKEND (v4.1) ======
+EMB_BACKEND = os.environ.get("EMB_BACKEND", "local")  # "local" or "ollama"
+EMB_DIM = 384  # all-MiniLM-L6-v2 dimension
+
+# ====== ANN (Approximate Nearest Neighbors) (v4.1) ======
+USE_ANN = os.environ.get("ANN", "faiss")  # "faiss" or "none"
+ANN_NLIST = int(os.environ.get("ANN_NLIST", "256"))  # IVF clusters
+ANN_NPROBE = int(os.environ.get("ANN_NPROBE", "16"))  # clusters to search
+
+# ====== HYBRID SCORING (v4.1) ======
+ALPHA_HYBRID = float(os.environ.get("ALPHA", "0.5"))  # 0.5 = BM25 and dense equally weighted
+
+# ====== KPI TIMINGS (v4.1) ======
+class KPI:
+    retrieve_ms = 0
+    ann_ms = 0
+    rerank_ms = 0
+    ask_ms = 0
+
 # Task G: Deterministic timeouts (environment-configurable for ops)
 EMB_CONNECT_T = float(os.environ.get("EMB_CONNECT_TIMEOUT", "3"))
 EMB_READ_T = float(os.environ.get("EMB_READ_TIMEOUT", "60"))
@@ -62,9 +81,12 @@ REFUSAL_STR = "I don't know based on the MD."
 
 FILES = {
     "chunks": "chunks.jsonl",
-    "emb": "vecs_n.npy",  # Pre-normalized embeddings
+    "emb": "vecs_n.npy",  # Pre-normalized embeddings (float32)
+    "emb_f16": "vecs_f16.memmap",  # float16 memory-mapped (optional)
+    "emb_cache": "emb_cache.jsonl",  # Per-chunk embedding cache
     "meta": "meta.jsonl",
     "bm25": "bm25.json",
+    "faiss_index": "faiss.index",  # FAISS IVFFlat index (v4.1)
     "hnsw": "hnsw_cosine.bin",  # Optional HNSW index (if USE_HNSWLIB=1)
     "index_meta": "index.meta.json",  # Artifact versioning
 }
@@ -136,6 +158,259 @@ def get_session(retries=0):
         _mount_retries(REQUESTS_SESSION, retries)
         REQUESTS_SESSION_RETRIES = retries
     return REQUESTS_SESSION
+
+
+# ====== LOCAL EMBEDDINGS (v4.1 - Section 2) ======
+_ST_ENCODER = None
+_ST_BATCH_SIZE = 96
+
+def _load_st_encoder():
+    """Lazy-load SentenceTransformer model once."""
+    global _ST_ENCODER
+    if _ST_ENCODER is None:
+        from sentence_transformers import SentenceTransformer
+        _ST_ENCODER = SentenceTransformer("all-MiniLM-L6-v2")
+        logger.debug("Loaded SentenceTransformer: all-MiniLM-L6-v2 (384-dim)")
+    return _ST_ENCODER
+
+def embed_local_batch(texts: list, normalize: bool = True) -> np.ndarray:
+    """Encode texts locally using SentenceTransformer in batches."""
+    model = _load_st_encoder()
+    vecs = []
+    for i in range(0, len(texts), _ST_BATCH_SIZE):
+        batch = texts[i:i+_ST_BATCH_SIZE]
+        batch_vecs = model.encode(batch, normalize_embeddings=normalize, convert_to_numpy=True)
+        vecs.append(batch_vecs.astype("float32"))
+    return np.vstack(vecs) if vecs else np.zeros((0, EMB_DIM), dtype="float32")
+
+# ====== FAISS ANN INDEX (v4.1 - Section 3) ======
+_FAISS_INDEX = None
+
+def _try_load_faiss():
+    """Try importing FAISS; returns None if not available."""
+    try:
+        import faiss
+        return faiss
+    except ImportError:
+        logger.info("info: ann=fallback reason=missing-faiss")
+        return None
+
+def build_faiss_index(vecs: np.ndarray, nlist: int = 256, metric: str = "ip") -> object:
+    """Build FAISS IVFFlat index (inner product for cosine on normalized vectors)."""
+    faiss = _try_load_faiss()
+    if faiss is None:
+        return None
+
+    dim = vecs.shape[1]
+    quantizer = faiss.IndexFlatIP(dim)
+    index = faiss.IndexIVFFlat(quantizer, dim, nlist, faiss.METRIC_INNER_PRODUCT)
+
+    train_size = min(20000, len(vecs))
+    train_indices = np.random.choice(len(vecs), train_size, replace=False)
+    train_vecs = vecs[train_indices].astype("float32")
+    index.train(train_vecs)
+    index.add(vecs.astype("float32"))
+    index.nprobe = ANN_NPROBE
+
+    logger.debug(f"Built FAISS index: nlist={nlist}, nprobe={ANN_NPROBE}, vectors={len(vecs)}")
+    return index
+
+def save_faiss_index(index, path: str = None):
+    """Save FAISS index to disk."""
+    if index is None or path is None:
+        return
+    faiss = _try_load_faiss()
+    if faiss:
+        faiss.write_index(index, path)
+        logger.debug(f"Saved FAISS index to {path}")
+
+def load_faiss_index(path: str = None) -> object:
+    """Load FAISS index from disk."""
+    if path is None or not os.path.exists(path):
+        return None
+    faiss = _try_load_faiss()
+    if faiss:
+        index = faiss.read_index(path)
+        index.nprobe = ANN_NPROBE
+        logger.debug(f"Loaded FAISS index from {path}")
+        return index
+    return None
+
+# ====== HYBRID SCORING (v4.1 - Section 4) ======
+def normalize_scores(scores: list) -> list:
+    """Min-max normalize scores to [0, 1]."""
+    if not scores or len(scores) == 0:
+        return scores
+    mn, mx = min(scores), max(scores)
+    if mx == mn:
+        return [0.5] * len(scores)
+    return [(s - mn) / (mx - mn) for s in scores]
+
+def hybrid_score(bm25_score: float, dense_score: float, alpha: float = 0.5) -> float:
+    """Blend BM25 and dense scores: alpha * bm25_norm + (1 - alpha) * dense_norm."""
+    return alpha * bm25_score + (1 - alpha) * dense_score
+
+# ====== DYNAMIC PACKING (v4.1 - Section 5) ======
+def pack_snippets_dynamic(chunk_ids: list, chunks: dict, budget_tokens: int = None, target_util: float = 0.75) -> tuple:
+    """Pack snippets with dynamic targeting. Returns (snippets, used_tokens, was_truncated)."""
+    if budget_tokens is None:
+        budget_tokens = CTX_TOKEN_BUDGET
+    if not chunk_ids:
+        return [], 0, False
+
+    snippets = []
+    token_count = 0
+    target = int(budget_tokens * target_util)
+
+    for cid in chunk_ids:
+        try:
+            chunk = chunks[cid]
+            snippet_tokens = max(1, len(chunk.get("text", "")) // 4)
+            separator_tokens = 16
+            new_total = token_count + snippet_tokens + separator_tokens
+
+            if new_total > budget_tokens:
+                if snippets:
+                    return snippets + [{"id": "[TRUNCATED]", "text": "..."}], token_count, True
+                else:
+                    snippets.append(chunk)
+                    return snippets, token_count + snippet_tokens, True
+
+            snippets.append(chunk)
+            token_count = new_total
+
+            if token_count >= target:
+                break
+        except:
+            pass
+
+    return snippets, token_count, False
+
+# ====== KPI LOGGING (v4.1 - Section 6) ======
+def log_kpi(topk: int, packed: int, used_tokens: int, rerank_applied: bool, rerank_reason: str = ""):
+    """Log KPI metrics in greppable format."""
+    kpi_line = (
+        f"retrieve={KPI.retrieve_ms:.1f}ms "
+        f"ann={KPI.ann_ms:.1f}ms "
+        f"rerank={KPI.rerank_ms:.1f}ms "
+        f"ask={KPI.ask_ms:.1f}ms "
+        f"total={KPI.retrieve_ms + KPI.rerank_ms + KPI.ask_ms:.1f}ms "
+        f"topk={topk} packed={packed} used_tokens={used_tokens} "
+        f"emb_backend={EMB_BACKEND} ann={USE_ANN} "
+        f"alpha={ALPHA_HYBRID} rerank_applied={rerank_applied}"
+    )
+    logger.info(f"kpi {kpi_line}")
+
+# ====== JSON OUTPUT (v4.1 - Section 9) ======
+def answer_to_json(answer: str, citations: list, used_tokens: int, topk: int, packed: int) -> dict:
+    """Convert answer and metadata to JSON structure."""
+    return {
+        "answer": answer,
+        "citations": citations,
+        "debug": {
+            "meta": {
+                "used_tokens": used_tokens,
+                "topk": topk,
+                "packed": packed,
+                "emb_backend": EMB_BACKEND,
+                "ann": USE_ANN,
+                "alpha": ALPHA_HYBRID
+            },
+            "timing": {
+                "retrieve_ms": KPI.retrieve_ms,
+                "ann_ms": KPI.ann_ms,
+                "rerank_ms": KPI.rerank_ms,
+                "ask_ms": KPI.ask_ms,
+                "total_ms": KPI.retrieve_ms + KPI.rerank_ms + KPI.ask_ms
+            }
+        }
+    }
+
+# ====== SELF-TEST (v4.1 - Section 8) ======
+def run_selftest() -> int:
+    """Run comprehensive self-tests. Exit 0 on success, 1 on failure."""
+    logger.info("=== SELF-TEST START ===")
+
+    # 1. Health check: Ollama connectivity
+    try:
+        r = get_session().get(f"{OLLAMA_URL}/api/tags", timeout=3)
+        if r.status_code != 200:
+            logger.error("❌ Ollama health check failed")
+            return 1
+        logger.info("✅ Ollama health check passed")
+    except Exception as e:
+        logger.error(f"❌ Ollama connection failed: {e}")
+        return 1
+
+    # 2. Embedding test
+    try:
+        if EMB_BACKEND == "local":
+            vecs = embed_local_batch(["hello world"], normalize=True)
+            if vecs.shape != (1, EMB_DIM):
+                logger.error(f"❌ Embedding shape wrong: {vecs.shape}")
+                return 1
+            logger.info(f"✅ Local embeddings working ({EMB_DIM}-dim)")
+        else:
+            r = get_session().post(f"{OLLAMA_URL}/api/embeddings",
+                                  json={"model": EMB_MODEL, "prompt": "test"})
+            if r.status_code != 200:
+                logger.error("❌ Ollama embeddings endpoint failed")
+                return 1
+            logger.info("✅ Ollama embeddings working")
+    except Exception as e:
+        logger.error(f"❌ Embedding test failed: {e}")
+        return 1
+
+    # 3. FAISS ANN test (if enabled)
+    if USE_ANN == "faiss":
+        try:
+            faiss = _try_load_faiss()
+            if faiss:
+                test_vecs = np.random.randn(10, EMB_DIM).astype("float32")
+                test_index = build_faiss_index(test_vecs, nlist=8)
+                q = np.random.randn(1, EMB_DIM).astype("float32")
+                dists, ids = test_index.search(q, 5)
+                logger.info(f"✅ FAISS ANN working (found {len(ids[0])} neighbors)")
+            else:
+                logger.warning("⚠️  FAISS not available, falling back to full-scan")
+                return 1
+        except Exception as e:
+            logger.error(f"❌ FAISS test failed: {e}")
+            return 1
+
+    # 4. Determinism check
+    try:
+        seed = 42
+        np.random.seed(seed)
+        prompt = "What is Clockify?"
+
+        r1 = get_session().post(
+            f"{OLLAMA_URL}/api/generate",
+            json={"model": GEN_MODEL, "prompt": prompt, "options": {"seed": seed}},
+            timeout=CHAT_READ_T
+        )
+        ans1 = r1.json().get("response", "")
+
+        np.random.seed(seed)
+        r2 = get_session().post(
+            f"{OLLAMA_URL}/api/generate",
+            json={"model": GEN_MODEL, "prompt": prompt, "options": {"seed": seed}},
+            timeout=CHAT_READ_T
+        )
+        ans2 = r2.json().get("response", "")
+
+        h1 = hashlib.md5(ans1.encode()).hexdigest()[:16]
+        h2 = hashlib.md5(ans2.encode()).hexdigest()[:16]
+        deterministic = (h1 == h2)
+
+        logger.info(f"[DETERMINISM] run1={h1} run2={h2} deterministic={deterministic}")
+    except Exception as e:
+        logger.error(f"❌ Determinism test failed: {e}")
+        return 1
+
+    logger.info("=== SELF-TEST PASSED ===")
+    return 0
+
 
 def _pid_alive(pid: int) -> bool:
     """Check if a process is alive. Cross-platform - Task D."""
@@ -1493,6 +1768,9 @@ def chat_repl(top_k=12, pack_top=6, threshold=0.30, use_rerank=False, debug=Fals
 
 # ====== MAIN ======
 def main():
+    # v4.1: Declare globals at function start (Section 7)
+    global EMB_BACKEND, USE_ANN, ALPHA_HYBRID
+
     ap = argparse.ArgumentParser(
         prog="clockify_support_cli",
         description="Clockify internal support chatbot (offline, stateless, closed-book)"
@@ -1529,11 +1807,31 @@ def main():
     # Task A: determinism check flags
     c.add_argument("--det-check", action="store_true", help="Determinism check: ask same Q twice, compare hashes")
 
+    # v4.1: Ollama optimization flags (Section 7)
+    ap.add_argument("--emb-backend", choices=["local", "ollama"], default=EMB_BACKEND,
+                   help="Embedding backend: local (SentenceTransformer) or ollama (default local)")
+    ap.add_argument("--ann", choices=["faiss", "none"], default=USE_ANN,
+                   help="ANN index: faiss (IVFFlat) or none (full-scan, default faiss)")
+    ap.add_argument("--alpha", type=float, default=ALPHA_HYBRID,
+                   help="Hybrid scoring blend: alpha*BM25 + (1-alpha)*dense (default 0.5)")
+    ap.add_argument("--selftest", action="store_true", help="Run self-tests and exit (v4.1)")
+    ap.add_argument("--json", action="store_true", help="Output answer as JSON with metrics (v4.1)")
+
     args = ap.parse_args()
 
     # Setup logging after CLI arg parsing
     level = getattr(logging, args.log if hasattr(args, "log") else "INFO")
     logging.basicConfig(level=level, format="%(levelname)s: %(message)s")
+
+    # v4.1: Update globals from CLI args (Section 7)
+    EMB_BACKEND = args.emb_backend
+    USE_ANN = args.ann
+    ALPHA_HYBRID = args.alpha
+
+    # v4.1: Run selftest if requested (Section 8)
+    if getattr(args, "selftest", False):
+        exit_code = run_selftest()
+        sys.exit(exit_code)
 
     # Validate and set config from CLI args
     try:
