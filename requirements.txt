@@ -1,4 +1,4 @@
-# Clockify Support CLI v4.0 - Ollama Optimized
+# Clockify Support CLI v4.1.2 - Ollama Optimized with M1 Support
 # Production dependencies (pinned versions)
 
 # HTTP client and networking
@@ -14,6 +14,12 @@ torch==2.4.2
 rank-bm25==0.2.2
 
 # ANN (Approximate Nearest Neighbors) - optional but recommended
+# IMPORTANT FOR M1 USERS:
+#   - pip installation may fail on ARM64 macOS
+#   - Use conda for best compatibility:
+#     conda install -c conda-forge faiss-cpu=1.8.0
+#   - See M1_COMPATIBILITY.md for detailed installation instructions
+#   - Application has graceful fallback if FAISS is unavailable
 faiss-cpu==1.8.0.post1
 
 # Optional: for development/testing

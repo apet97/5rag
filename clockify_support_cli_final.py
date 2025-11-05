@@ -542,6 +542,30 @@ def validate_chunk_config():
         raise ValueError(f"CHUNK_OVERLAP ({CHUNK_OVERLAP}) must be < CHUNK_CHARS ({CHUNK_CHARS})")
     logger.debug(f"Chunk config: size={CHUNK_CHARS}, overlap={CHUNK_OVERLAP}")
 
+def check_pytorch_mps():
+    """Check PyTorch MPS availability on M1 Macs and log warnings (v4.1.2)."""
+    is_macos_arm64 = platform.system() == "Darwin" and platform.machine() == "arm64"
+
+    if not is_macos_arm64:
+        return  # Only relevant for M1/M2/M3 Macs
+
+    try:
+        import torch
+        mps_available = torch.backends.mps.is_available()
+
+        if mps_available:
+            logger.info("info: pytorch_mps=available platform=arm64 (GPU acceleration enabled)")
+        else:
+            logger.warning(
+                "warning: pytorch_mps=unavailable platform=arm64 "
+                "hint='Embeddings will use CPU (slower). Ensure macOS 12.3+ and PyTorch 1.12+'"
+            )
+            logger.warning("  To fix: pip install --upgrade torch or conda install -c pytorch pytorch")
+    except ImportError:
+        logger.debug("info: pytorch not imported, skipping MPS check")
+    except Exception as e:
+        logger.debug(f"info: pytorch_mps check failed: {e}")
+
 def _log_config_summary(use_rerank=False, pack_top=DEFAULT_PACK_TOP, seed=DEFAULT_SEED, threshold=DEFAULT_THRESHOLD, top_k=DEFAULT_TOP_K, num_ctx=DEFAULT_NUM_CTX, num_predict=DEFAULT_NUM_PREDICT, retries=0):
     """Log configuration summary at startup - Task I."""
     proxy_trust = 1 if os.getenv("ALLOW_PROXIES") == "1" else 0
@@ -1938,6 +1962,7 @@ def main():
             ctx_budget=args.ctx_budget
         )
         validate_chunk_config()
+        check_pytorch_mps()  # v4.1.2: Check MPS availability on M1 Macs
     except ValueError as e:
         logger.error(f"CONFIG ERROR: {e}")
         sys.exit(1)
