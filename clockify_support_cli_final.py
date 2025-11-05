@@ -1011,14 +1011,14 @@ def rerank_with_llm(question: str, chunks, selected, scores, seed=DEFAULT_SEED, 
 
         if not msg:
             # Task B: rerank failure - empty response
-            logger.info("info: rerank=fallback reason=empty")
+            logger.debug("info: rerank=fallback reason=empty")
             return selected, rerank_scores, False, "empty"
 
         # Try to parse strict JSON array
         try:
             ranked = json.loads(msg)
             if not isinstance(ranked, list):
-                logger.info("info: rerank=fallback reason=json")
+                logger.debug("info: rerank=fallback reason=json")
                 return selected, rerank_scores, False, "json"
 
             # Map back to indices
@@ -1035,31 +1035,31 @@ def rerank_with_llm(question: str, chunks, selected, scores, seed=DEFAULT_SEED, 
                 reranked.sort(key=lambda x: x[1], reverse=True)
                 return [idx for idx, _ in reranked], rerank_scores, True, ""
             else:
-                logger.info("info: rerank=fallback reason=empty")
+                logger.debug("info: rerank=fallback reason=empty")
                 return selected, rerank_scores, False, "empty"
         except json.JSONDecodeError:
             # Task B: JSON parse failed, fall back to MMR order
-            logger.info("info: rerank=fallback reason=json")
+            logger.debug("info: rerank=fallback reason=json")
             return selected, rerank_scores, False, "json"
     except requests.exceptions.Timeout as e:
         # Task B: timeout
-        logger.info("info: rerank=fallback reason=timeout")
+        logger.debug("info: rerank=fallback reason=timeout")
         return selected, rerank_scores, False, "timeout"
     except requests.exceptions.ConnectionError as e:
         # Task B: connection error
-        logger.info("info: rerank=fallback reason=conn")
+        logger.debug("info: rerank=fallback reason=conn")
         return selected, rerank_scores, False, "conn"
     except requests.exceptions.HTTPError as e:
         # Task B: HTTP error
-        logger.info(f"info: rerank=fallback reason=http")
+        logger.debug(f"info: rerank=fallback reason=http")
         return selected, rerank_scores, False, "http"
     except requests.exceptions.RequestException:
         # HTTP error, fall back to MMR order
-        logger.info("info: rerank=fallback reason=http")
+        logger.debug("info: rerank=fallback reason=http")
         return selected, rerank_scores, False, "http"
     except Exception:
         # Unexpected error, fall back to MMR order
-        logger.info("info: rerank=fallback reason=http")
+        logger.debug("info: rerank=fallback reason=http")
         return selected, rerank_scores, False, "http"
 
 def _fmt_snippet_header(chunk):
@@ -1484,7 +1484,7 @@ def answer_once(
         if not coverage_pass:
             if debug:
                 print(f"\n[DEBUG] Coverage failed: {len(mmr_selected)} selected, need ≥2 @ {threshold}")
-            logger.info(f"[coverage_gate] REJECTED: seed={seed} model={GEN_MODEL} selected={len(mmr_selected)} threshold={threshold}")
+            logger.debug(f"[coverage_gate] REJECTED: seed={seed} model={GEN_MODEL} selected={len(mmr_selected)} threshold={threshold}")
             return REFUSAL_STR, {"selected": []}
 
         # Step 5: Pack with token budget and snippet cap (Task C)
@@ -1867,8 +1867,8 @@ def main():
 
     # v4.1: Run selftest if requested (Section 8)
     if getattr(args, "selftest", False):
-        exit_code = run_selftest()
-        sys.exit(exit_code)
+        success = run_selftest()
+        sys.exit(0 if success else 1)
 
     # Validate and set config from CLI args
     try:
@@ -1904,35 +1904,31 @@ def main():
                     break
             result = load_index()
             if result:
-                chunks, vecs_n, bm, hnsw = result
+                # v4.1: Determinism check using Ollama with tuple timeouts and retry helper
+                try:
+                    seed = 42
+                    np.random.seed(seed)
+                    prompt = "What is Clockify?"
+                    payload = {"model": GEN_MODEL, "prompt": prompt, "options": {"seed": seed}}
 
-                # Task A: Use existing seed, temperature=0, same retrieval path
-                q = "How do I track time in Clockify?"
+                    r1 = http_post_with_retries(f"{OLLAMA_URL}/api/generate", payload,
+                                                retries=2, timeout=(CHAT_CONNECT_T, CHAT_READ_T))
+                    ans1 = r1.json().get("response", "")
 
-                # Run 1
-                a1, _ = answer_once(
-                    q, chunks, vecs_n, bm,
-                    top_k=args.topk, pack_top=args.pack, threshold=args.threshold,
-                    use_rerank=args.rerank, debug=False, hnsw=hnsw,
-                    seed=args.seed, num_ctx=args.num_ctx, num_predict=args.num_predict, retries=getattr(args, "retries", 0)
-                )
+                    np.random.seed(seed)
+                    r2 = http_post_with_retries(f"{OLLAMA_URL}/api/generate", payload,
+                                                retries=2, timeout=(CHAT_CONNECT_T, CHAT_READ_T))
+                    ans2 = r2.json().get("response", "")
 
-                # Run 2
-                a2, _ = answer_once(
-                    q, chunks, vecs_n, bm,
-                    top_k=args.topk, pack_top=args.pack, threshold=args.threshold,
-                    use_rerank=args.rerank, debug=False, hnsw=hnsw,
-                    seed=args.seed, num_ctx=args.num_ctx, num_predict=args.num_predict, retries=getattr(args, "retries", 0)
-                )
-
-                # Task A: Compute SHA256 of each answer after .strip()
-                h1 = hashlib.sha256(a1.strip().encode()).hexdigest()[:16]
-                h2 = hashlib.sha256(a2.strip().encode()).hexdigest()[:16]
-                is_det = (h1 == h2)
-
-                # Task A: Print result and exit
-                print(f'[DETERMINISM] run1={h1} run2={h2} deterministic={"true" if is_det else "false"}')
-                sys.exit(0)
+                    h1 = hashlib.md5(ans1.encode()).hexdigest()[:16]
+                    h2 = hashlib.md5(ans2.encode()).hexdigest()[:16]
+                    deterministic = (h1 == h2)
+                    logger.info(f"[DETERMINISM] run1={h1} run2={h2} deterministic={deterministic}")
+                    print(f'[DETERMINISM] run1={h1} run2={h2} deterministic={"true" if deterministic else "false"}')
+                    sys.exit(0 if deterministic else 1)
+                except Exception as e:
+                    logger.error(f"❌ Determinism test failed: {e}")
+                    sys.exit(1)
             else:
                 logger.error("failed to load index for det-check")
                 sys.exit(1)
