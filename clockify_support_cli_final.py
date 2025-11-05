@@ -15,7 +15,7 @@ HOW TO RUN
 
 DESIGN
 ======
-- Fully offline: uses only http://10.127.0.192:11434 (local Ollama)
+- Fully offline: uses only http://127.0.0.1:11434 (local Ollama)
 - Stateless REPL: each turn forgets prior context
 - Hybrid retrieval: BM25 (sparse) + dense (semantic) + MMR diversification
 - Closed-book: refuses low-confidence answers
@@ -1885,7 +1885,7 @@ def main():
     ap.add_argument("--log", default="INFO", choices=["DEBUG", "INFO", "WARN"],
                     help="Logging level (default INFO)")
     ap.add_argument("--ollama-url", type=str, default=None,
-                    help="Ollama endpoint (default from OLLAMA_URL env or http://10.127.0.192:11434)")
+                    help="Ollama endpoint (default from OLLAMA_URL env or http://127.0.0.1:11434)")
     ap.add_argument("--gen-model", type=str, default=None,
                     help="Generation model name (default from GEN_MODEL env or qwen2.5:32b)")
     ap.add_argument("--emb-model", type=str, default=None,

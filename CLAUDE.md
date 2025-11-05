@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **Clockify RAG CLI** – A local, offline retrieval-augmented generation (RAG) system that answers questions about Clockify's documentation using a local Ollama instance.
 
 - **Two implementations**: v1.0 (simple, educational) and v2.0 (production-ready, recommended)
-- **Fully offline**: No external APIs; uses local Ollama at `http://10.127.0.192:11434`
+- **Fully offline**: No external APIs; uses local Ollama at `http://127.0.0.1:11434` (configurable)
 - **Knowledge source**: 6.9 MB Clockify markdown documentation (~150 pages)
 - **User interface**: CLI with command-line interface (v1.0) or interactive REPL (v2.0)
 
@@ -53,7 +53,7 @@ Response (answer with citations or "I don't know based on the MD.")
 - `numpy==2.3.4` – Numerical arrays (embeddings, vectors)
 
 **External services**:
-- Ollama (http://10.127.0.192:11434) with models:
+- Ollama (default: http://127.0.0.1:11434, configurable via OLLAMA_URL) with models:
   - `nomic-embed-text` – 768-dim semantic embeddings
   - `qwen2.5:32b` – LLM for answer generation
 
@@ -178,7 +178,8 @@ python3 clockify_support_cli.py ask "How do I set up SSO?"
 
 ```bash
 # Ollama endpoint (default: http://127.0.0.1:11434)
-export OLLAMA_URL="http://10.127.0.192:11434"
+# Override only if Ollama runs on a different machine
+export OLLAMA_URL="http://127.0.0.1:11434"
 
 # Model names
 export GEN_MODEL="qwen2.5:32b"
@@ -245,8 +246,9 @@ If source KB changes, rebuild is automatically triggered.
 
 ### Connection Issues
 - Verify Ollama is running: `ollama serve`
-- Check URL matches actual Ollama endpoint: `http://10.127.0.192:11434`
-- Default in code is `http://127.0.0.1:11434`; override with env var if needed
+- Default endpoint is `http://127.0.0.1:11434` (localhost)
+- Override with `OLLAMA_URL` env var if Ollama runs on different machine
+- Check connectivity: `curl http://127.0.0.1:11434/api/version`
 
 ### Model Issues
 - Pull missing models: `ollama pull nomic-embed-text`, `ollama pull qwen2.5:32b`
