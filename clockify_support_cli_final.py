@@ -901,14 +901,30 @@ def embed_query(question: str, retries=0) -> np.ndarray:
         sys.exit(1)
 
 def retrieve(question: str, chunks, vecs_n, bm, top_k=12, hnsw=None, retries=0):
-    """Hybrid retrieval: dense + BM25 + dedup. Optionally uses HNSW for fast K-NN.
+    """Hybrid retrieval: dense + BM25 + dedup. Optionally uses FAISS/HNSW for fast K-NN.
 
     Scoring: hybrid = ALPHA_HYBRID * normalize(BM25) + (1 - ALPHA_HYBRID) * normalize(dense)
     """
+    global _FAISS_INDEX
+
     qv_n = embed_query(question, retries=retries)
 
-    # Use HNSW if available for fast candidate generation
-    if hnsw:
+    # v4.1: Try to load FAISS index once on first call
+    if USE_ANN == "faiss" and _FAISS_INDEX is None:
+        _FAISS_INDEX = load_faiss_index(FILES["faiss_index"])
+        if _FAISS_INDEX:
+            _FAISS_INDEX.nprobe = ANN_NPROBE
+            logger.info("info: ann=faiss status=loaded nprobe=%d", ANN_NPROBE)
+        else:
+            logger.info("info: ann=fallback reason=missing-index")
+
+    # Use FAISS if available for fast candidate generation
+    if _FAISS_INDEX:
+        D, I = _FAISS_INDEX.search(qv_n.reshape(1, -1).astype("float32"), max(200, top_k * 3))
+        candidate_idx = [int(i) for i in I[0] if i >= 0]
+        dense_scores = np.array([float(d) for d in D[0][:len(candidate_idx)]])
+    # Fallback to HNSW if available
+    elif hnsw:
         _, cand = hnsw.knn_query(qv_n, k=max(200, top_k * 3))
         candidate_idx = cand[0].tolist()
         dense_scores_full = vecs_n.dot(qv_n)
@@ -920,7 +936,7 @@ def retrieve(question: str, chunks, vecs_n, bm, top_k=12, hnsw=None, retries=0):
 
     bm_scores = bm25_scores(question, bm)
     zs_dense = normalize_scores(dense_scores)
-    zs_bm = normalize_scores(bm_scores[candidate_idx] if hnsw else bm_scores)
+    zs_bm = normalize_scores(bm_scores[candidate_idx] if (_FAISS_INDEX or hnsw) else bm_scores)
     # v4.1: Use configurable ALPHA_HYBRID for blending
     hybrid = ALPHA_HYBRID * zs_bm + (1 - ALPHA_HYBRID) * zs_dense
     top_idx = np.argsort(hybrid)[::-1][:top_k]
@@ -1658,8 +1674,8 @@ def run_selftest():
     return all(status == "PASS" for _, status in results)
 
 # ====== REPL ======
-def chat_repl(top_k=12, pack_top=6, threshold=0.30, use_rerank=False, debug=False, seed=DEFAULT_SEED, num_ctx=DEFAULT_NUM_CTX, num_predict=DEFAULT_NUM_PREDICT, retries=0):
-    """Stateless REPL loop - Task I."""
+def chat_repl(top_k=12, pack_top=6, threshold=0.30, use_rerank=False, debug=False, seed=DEFAULT_SEED, num_ctx=DEFAULT_NUM_CTX, num_predict=DEFAULT_NUM_PREDICT, retries=0, use_json=False):
+    """Stateless REPL loop - Task I. v4.1: JSON output support."""
     # Task I: log config summary at startup
     _log_config_summary(use_rerank=use_rerank, pack_top=pack_top, seed=seed, threshold=threshold, top_k=top_k, num_ctx=num_ctx, num_predict=num_predict, retries=retries)
 
@@ -1698,6 +1714,9 @@ def chat_repl(top_k=12, pack_top=6, threshold=0.30, use_rerank=False, debug=Fals
     print("CLOCKIFY SUPPORT – Local, Stateless, Closed-Book")
     print("=" * 70)
     print("Type a question. Commands: :exit, :debug")
+
+    # v4.1: Warm-up on startup to reduce first-token latency
+    warmup_on_startup()
     print("=" * 70 + "\n")
 
     dbg = debug
@@ -1731,8 +1750,43 @@ def chat_repl(top_k=12, pack_top=6, threshold=0.30, use_rerank=False, debug=Fals
             num_predict=num_predict,
             retries=retries
         )
-        print(ans)
-        print()
+        # v4.1: JSON output support
+        if use_json:
+            output = answer_to_json(ans, meta.get("selected", []), len(meta.get("selected", [])), top_k, pack_top)
+            print(json.dumps(output, ensure_ascii=False, indent=2))
+        else:
+            print(ans)
+            print()
+
+# ====== WARM-UP (v4.1 - Section 6) ======
+def warmup_on_startup():
+    """Warm-up embeddings and LLM on startup (reduces first-token latency)."""
+    warmup_enabled = os.environ.get("WARMUP", "1").lower() in ("1", "true", "yes")
+    if not warmup_enabled:
+        logger.debug("Warm-up disabled via WARMUP=0")
+        return
+
+    try:
+        logger.info("info: warmup=start")
+        # Warm-up embedding model with trivial query
+        embed_query("warmup", retries=1)
+        # Warm-up LLM with trivial prompt
+        payload = {
+            "model": GEN_MODEL,
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": False,
+            "max_tokens": 10
+        }
+        s = get_session()
+        r = http_post_with_retries(
+            f"{OLLAMA_URL}/api/chat",
+            payload,
+            retries=1,
+            timeout=(CHAT_CONNECT_T, CHAT_READ_T)
+        )
+        logger.info("info: warmup=done")
+    except Exception as e:
+        logger.debug(f"Warm-up skipped: {e}")
 
 # ====== MAIN ======
 def main():
@@ -1893,7 +1947,8 @@ def main():
             seed=args.seed,
             num_ctx=args.num_ctx,
             num_predict=args.num_predict,
-            retries=getattr(args, "retries", 0)
+            retries=getattr(args, "retries", 0),
+            use_json=getattr(args, "json", False)  # v4.1: JSON output flag
         )
         return
 

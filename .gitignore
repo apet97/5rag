@@ -1,10 +1,16 @@
 # Knowledge base artifacts (generated, not versioned)
 chunks.jsonl
 vecs_n.npy
+vecs_f16.memmap
 vecs.npy
 meta.jsonl
 bm25.json
 index.meta.json
+
+# v4.1 FAISS and ANN indexes
+faiss.index
+hnsw_cosine.bin
+emb_cache.jsonl
 
 # Build artifacts
 .build.lock
@@ -13,6 +19,7 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+build.log
 
 # Process files
 .shim.pid
