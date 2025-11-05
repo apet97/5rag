@@ -1477,7 +1477,7 @@ def answer_once(
 
             # Patch 6: Add greppable rerank fallback log
             if not rerank_applied:
-                logger.info("info: rerank=fallback reason=%s", rerank_reason)
+                logger.debug("info: rerank=fallback reason=%s", rerank_reason)
 
         # Step 4: Coverage check
         coverage_pass = coverage_ok(mmr_selected, scores["dense"], threshold)
