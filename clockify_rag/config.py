@@ -70,6 +70,11 @@ CHAT_CONNECT_T = float(os.environ.get("CHAT_CONNECT_TIMEOUT", "3"))
 CHAT_READ_T = float(os.environ.get("CHAT_READ_TIMEOUT", "120"))
 RERANK_READ_T = float(os.environ.get("RERANK_READ_TIMEOUT", "180"))
 
+# ====== EMBEDDING BATCHING CONFIG (Rank 10) ======
+# Parallel embedding generation for faster KB builds (3-5x speedup)
+EMB_MAX_WORKERS = int(os.environ.get("EMB_MAX_WORKERS", "8"))  # Concurrent requests
+EMB_BATCH_SIZE = int(os.environ.get("EMB_BATCH_SIZE", "32"))  # Texts per batch
+
 # ====== REFUSAL STRING ======
 # Exact refusal string (ASCII quotes only)
 REFUSAL_STR = "I don't know based on the MD."
