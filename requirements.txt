@@ -12,6 +12,7 @@ numpy==2.3.4
 sentence-transformers==3.3.1
 torch==2.4.2
 rank-bm25==0.2.2
+nltk==3.9.1  # Rank 23: Sentence-aware chunking
 
 # ANN (Approximate Nearest Neighbors) - optional but recommended
 # IMPORTANT FOR M1 USERS:
