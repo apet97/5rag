@@ -472,14 +472,23 @@ def log_kpi(topk: int, packed: int, used_tokens: int, rerank_applied: bool, rera
     logger.info(f"kpi {kpi_line}")
 
 # ====== JSON OUTPUT (v4.1 - Section 9) ======
-def answer_to_json(answer: str, citations: list, used_tokens: int, topk: int, packed: int) -> dict:
-    """Convert answer and metadata to JSON structure."""
+def answer_to_json(answer: str, citations: list, used_tokens: int | None, topk: int, packed: int) -> dict:
+    """Convert answer and metadata to JSON structure.
+
+    Args:
+        answer: Generated answer text.
+        citations: Sequence of citation identifiers (chunk IDs).
+        used_tokens: Actual token budget consumed when packing context.
+        topk: Retrieval depth requested.
+        packed: Maximum number of snippets packed.
+    """
+    budget_tokens = 0 if used_tokens is None else int(used_tokens)
     return {
         "answer": answer,
         "citations": citations,
         "debug": {
             "meta": {
-                "used_tokens": used_tokens,
+                "used_tokens": budget_tokens,
                 "topk": topk,
                 "packed": packed,
                 "emb_backend": EMB_BACKEND,
@@ -2551,14 +2560,14 @@ def answer_once(
         question = sanitize_question(question)
     except ValueError as e:
         logger.warning(f"Invalid question: {e}")
-        return f"Invalid question: {e}", {"selected": [], "scores": [], "timings": {}, "refused": False}
+        return f"Invalid question: {e}", {"selected": [], "scores": [], "timings": {}, "refused": False, "used_tokens": 0}
 
     # Check rate limit
     if not RATE_LIMITER.allow_request():
         wait_seconds = RATE_LIMITER.wait_time()
         logger.warning(f"Rate limit exceeded, wait {wait_seconds:.0f}s")
         return f"Rate limit exceeded. Please wait {wait_seconds:.0f} seconds before next query.", {
-            "selected": [], "scores": [], "timings": {}, "refused": False, "rate_limited": True
+            "selected": [], "scores": [], "timings": {}, "refused": False, "rate_limited": True, "used_tokens": 0
         }
 
     # Check query cache (Rank 14: 100% speedup on repeated queries)
@@ -2567,6 +2576,7 @@ def answer_once(
         answer, cached_metadata = cached_result
         # Work on a copy so cached metadata (including timestamp) remains intact
         metadata = dict(cached_metadata) if cached_metadata is not None else {}
+        metadata.setdefault("used_tokens", 0)
         metadata["cached"] = True
         metadata["cache_hit"] = True
         # Quick Win #9: Add cache hit logging
@@ -2640,7 +2650,7 @@ def answer_once(
             )
 
             # Cache refusal (Rank 14)
-            refusal_metadata = {"selected": [], "refused": True, "cached": False, "cache_hit": False}
+            refusal_metadata = {"selected": [], "refused": True, "cached": False, "cache_hit": False, "used_tokens": 0}
             refusal_metadata["timestamp"] = time.time()
             QUERY_CACHE.put(question, REFUSAL_STR, refusal_metadata)
 
@@ -3111,13 +3121,10 @@ def chat_repl(top_k=12, pack_top=6, threshold=0.30, use_rerank=False, debug=Fals
         )
         # v4.1: JSON output support
         if use_json:
-            used_tokens = meta.get("used_tokens")
-            if used_tokens is None:
-                used_tokens = len(meta.get("selected", []))
             output = answer_to_json(
                 ans,
                 meta.get("selected", []),
-                used_tokens,
+                meta.get("used_tokens"),
                 top_k,
                 pack_top
             )
