@@ -4,7 +4,7 @@ This directory contains ground truth evaluation datasets for measuring RAG syste
 
 ## clockify_v1.jsonl
 
-**Status**: ⚠️ Needs chunk ID population
+**Status**: ✅ Populated with title/section relevance labels
 **Questions**: 20
 **Format**: JSONL (one JSON object per line)
 
@@ -13,7 +13,10 @@ This directory contains ground truth evaluation datasets for measuring RAG syste
 ```json
 {
   "query": "User question text",
-  "relevant_chunk_ids": ["chunk_id_1", "chunk_id_2"],
+  "relevant_chunks": [
+    {"title": "[ARTICLE] Track your time - Clockify Help", "section": "## Chunk 5"},
+    {"title": "[ARTICLE] Track your time - Clockify Help", "section": "## Chunk 4"}
+  ],
   "difficulty": "easy|medium|hard",
   "tags": ["tag1", "tag2"],
   "language": "en",
@@ -24,18 +27,29 @@ This directory contains ground truth evaluation datasets for measuring RAG syste
 ### Fields
 
 - `query`: The user's question (required)
-- `relevant_chunk_ids`: List of chunk IDs from chunks.jsonl that contain relevant information (required)
+- `relevant_chunks`: List of chunk metadata objects with the article `title` and `section`
+  strings produced by the chunker. Multiple matches are allowed when the same
+  article-section pair appears more than once (e.g., overlapping chunks).
 - `difficulty`: Question difficulty level (easy/medium/hard)
 - `tags`: Categorization tags for analysis
 - `language`: Query language code (ISO 639-1)
 - `notes`: Helper notes for manual chunk ID identification
 
-### How to Populate Chunk IDs
+### How relevance labels are generated
 
-The dataset currently has empty `relevant_chunk_ids` arrays. To populate them:
+The dataset uses title/section pairs instead of raw chunk IDs because the
+Clockify chunker generates UUIDs on every build. We populate
+`relevant_chunks` automatically by:
 
-#### Method 1: Manual Search (Recommended for accuracy)
+1. Chunking `knowledge_full.md` with the production chunker
+2. Building a BM25 index across all chunk texts
+3. Selecting the top matching article sections for each question, constrained
+   by the guidance in the `notes` field (keywords are extracted and matched)
 
+This approach keeps the dataset stable across rebuilds while still pointing to
+concrete passages in the knowledge base. If additional curation is needed you
+can edit the `relevant_chunks` list manually—any combination of title + section
+found in `chunks.jsonl` will be resolved by the evaluation script.
 ```bash
 # 1. Load chunks.jsonl
 python3 -c "

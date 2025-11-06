@@ -1,24 +1,56 @@
 #!/usr/bin/env python3
-"""
-Evaluate RAG system on ground truth dataset.
+"""Offline evaluation runner for the Clockify RAG system.
 
-Computes retrieval metrics:
-- MRR (Mean Reciprocal Rank): Position of first relevant result
-- Precision@K: Fraction of top K results that are relevant
-- NDCG@K: Normalized Discounted Cumulative Gain (position-aware)
+The script supports two modes of operation:
+
+1. **Full RAG evaluation** – uses the production ``retrieve`` pipeline if the
+   hybrid index (``chunks.jsonl`` + ``vecs_n.npy`` + ``bm25.json``) is present
+   and importable. This measures the real retrieval stack (dense + BM25 + MMR).
+2. **Lexical fallback** – if the hybrid index is unavailable, the script builds
+   an in-memory BM25 index directly from ``knowledge_full.md`` using the same
+   chunking heuristics as the main application. This path keeps CI lightweight
+   (no heavy Torch/SentenceTransformer dependencies) while still validating the
+   knowledge base coverage.
+
+Both paths compute the same metrics:
+
+* MRR@10  – position of the first relevant result
+* Precision@5 – fraction of relevant results among the top 5 retrieved chunks
+* NDCG@10 – position-aware relevance weighting for the top 10 results
+
+The build fails (exit code 1) when any metric falls below the thresholds
+defined in ``SUCCESS_THRESHOLDS``.
 """
 
+from __future__ import annotations
+
+import argparse
 import json
-import sys
 import os
+import re
+import sys
+from collections import defaultdict
+
 import numpy as np
 
+try:
+    from rank_bm25 import BM25Okapi
+except ImportError:  # pragma: no cover - handled at runtime
+    BM25Okapi = None  # type: ignore[assignment]
 MRR_THRESHOLD = 0.70
 PRECISION_THRESHOLD = 0.60
 NDCG_THRESHOLD = 0.65
 
 # Add current directory to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+SUCCESS_THRESHOLDS = {
+    "mrr_at_10": 0.70,
+    "precision_at_5": 0.55,
+    "ndcg_at_10": 0.60,
+}
+
+TOP_K = 12
 
 
 def compute_mrr(retrieved_ids, relevant_ids):
@@ -79,7 +111,123 @@ def compute_ndcg_at_k(retrieved_ids, relevant_ids, k=10):
     return dcg / idcg if idcg > 0 else 0.0
 
 
-def evaluate(dataset_path="eval_dataset.jsonl", verbose=False):
+def _normalize_text(value: str) -> str:
+    """Lowercase + collapse whitespace for robust key matching."""
+
+    return re.sub(r"\s+", " ", value.strip().lower())
+
+
+def _tokenize(text: str) -> list[str]:
+    """Simple tokenizer for BM25 fallback."""
+
+    cleaned = re.sub(r"[^a-z0-9]+", " ", text.lower())
+    return [tok for tok in cleaned.split() if tok]
+
+
+class LexicalRetriever:
+    """BM25-based lexical retriever used when the hybrid index is unavailable."""
+
+    def __init__(self, chunks: list[dict]) -> None:
+        if BM25Okapi is None:
+            raise RuntimeError(
+                "rank-bm25 is required for lexical evaluation. Install rank-bm25"
+            )
+
+        corpus_tokens = []
+        for chunk in chunks:
+            fields = " ".join(
+                [
+                    chunk.get("title", ""),
+                    chunk.get("section", ""),
+                    chunk.get("text", ""),
+                ]
+            )
+            corpus_tokens.append(_tokenize(fields))
+        self._bm25 = BM25Okapi(corpus_tokens)
+
+    def retrieve(self, query: str, top_k: int = TOP_K) -> list[int]:
+        scores = self._bm25.get_scores(_tokenize(query))
+        order = np.argsort(scores)[::-1][:top_k]
+        return order.tolist()
+
+
+def _load_chunks() -> list[dict]:
+    """Load chunk metadata from disk or rebuild from the knowledge base."""
+
+    if os.path.exists("chunks.jsonl"):
+        chunks: list[dict] = []
+        with open("chunks.jsonl", "r", encoding="utf-8") as handle:
+            for line in handle:
+                if line.strip():
+                    chunks.append(json.loads(line))
+        return chunks
+
+    knowledge_path = os.path.join(os.path.dirname(__file__), "knowledge_full.md")
+    if not os.path.exists(knowledge_path):
+        raise FileNotFoundError(
+            "knowledge_full.md is missing. Run `make build` to generate chunks." \
+        )
+
+    try:
+        from clockify_rag.chunking import build_chunks
+    except ImportError as exc:
+        raise RuntimeError(
+            "clockify_rag.chunking is required to rebuild chunks. Install the "
+            "project dependencies (numpy, requests, nltk)."
+        ) from exc
+
+    return build_chunks(knowledge_path)
+
+
+def _build_chunk_lookup(chunks: list[dict]) -> tuple[dict[str, int], dict[str, set[int]], dict[str, set[int]]]:
+    """Create helper mappings for resolving dataset references."""
+
+    id_map: dict[str, int] = {}
+    title_section_map: dict[str, set[int]] = defaultdict(set)
+    title_map: dict[str, set[int]] = defaultdict(set)
+
+    for idx, chunk in enumerate(chunks):
+        cid = chunk.get("id")
+        if cid is not None:
+            id_map[str(cid)] = idx
+
+        title = _normalize_text(chunk.get("title", ""))
+        section = _normalize_text(chunk.get("section", ""))
+        title_map[title].add(idx)
+        title_section_map[f"{title}|{section}"].add(idx)
+
+    return id_map, title_section_map, title_map
+
+
+def _resolve_relevant_indices(
+    example: dict,
+    id_map: dict[str, int],
+    title_section_map: dict[str, set[int]],
+    title_map: dict[str, set[int]],
+) -> set[int]:
+    """Resolve dataset annotations into chunk indices."""
+
+    relevant: set[int] = set()
+
+    for cid in example.get("relevant_chunk_ids", []) or []:
+        idx = id_map.get(str(cid))
+        if idx is not None:
+            relevant.add(idx)
+
+    for chunk_ref in example.get("relevant_chunks", []) or []:
+        title = _normalize_text(chunk_ref.get("title", ""))
+        section = _normalize_text(chunk_ref.get("section", ""))
+        key = f"{title}|{section}"
+        if section and key in title_section_map:
+            relevant.update(title_section_map[key])
+            continue
+        if title in title_map:
+            relevant.update(title_map[title])
+
+    return relevant
+
+
+def evaluate(dataset_path="eval_datasets/clockify_v1.jsonl", verbose=False):
     """Run evaluation on dataset.
 
     Args:
@@ -92,16 +240,43 @@ def evaluate(dataset_path="eval_dataset.jsonl", verbose=False):
     # Check if dataset exists
     if not os.path.exists(dataset_path):
         print(f"Error: Evaluation dataset not found: {dataset_path}")
-        print("Create eval_dataset.jsonl with ground truth queries and relevant chunks.")
         sys.exit(1)
 
-    # Check if index is built
-    if not os.path.exists("chunks.jsonl") or not os.path.exists("vecs_n.npy"):
-        print("Error: Knowledge base not built. Run 'make build' first.")
-        sys.exit(1)
-
-    # Import after path setup
+    # Load chunk metadata (from built index or source markdown)
     try:
+        chunks = _load_chunks()
+    except Exception as exc:  # pragma: no cover - fatal setup error
+        print(f"Error preparing chunks: {exc}")
+        sys.exit(1)
+
+    # Try to load the production hybrid index; fallback to lexical BM25
+    rag_available = False
+    retrieval_chunks = chunks
+    retrieval_fn = None
+    lexical_retriever = None
+
+    if os.path.exists("vecs_n.npy") and os.path.exists("bm25.json"):
+        try:
+            from clockify_support_cli_final import load_index, retrieve
+
+            print("Loading knowledge base index...")
+            result = load_index()
+            if result:
+                retrieval_chunks, vecs, bm, _ = result
+                retrieval_fn = lambda q: retrieve(q, retrieval_chunks, vecs, bm, top_k=TOP_K)[0]
+                rag_available = True
+        except Exception as exc:  # pragma: no cover - fallback path
+            print(f"Warning: Hybrid index unavailable ({exc}). Falling back to lexical BM25.")
+
+    if not rag_available:
+        print("Building lexical BM25 index for evaluation...")
+        try:
+            lexical_retriever = LexicalRetriever(retrieval_chunks)
+            retrieval_fn = lexical_retriever.retrieve
+        except Exception as exc:  # pragma: no cover - fatal fallback error
+            print(f"Error building lexical index: {exc}")
+            sys.exit(1)
+
         from clockify_support_cli_final import load_index, retrieve
     except ImportError as e:
         print(f"Error importing RAG functions: {e}")
@@ -126,6 +301,8 @@ def evaluate(dataset_path="eval_dataset.jsonl", verbose=False):
             if line.strip():
                 dataset.append(json.loads(line))
 
+    id_map, title_section_map, title_map = _build_chunk_lookup(retrieval_chunks)
+
     print(f"Loaded {len(dataset)} evaluation queries")
 
     # Compute metrics
@@ -133,12 +310,18 @@ def evaluate(dataset_path="eval_dataset.jsonl", verbose=False):
     precision_at_5_scores = []
     ndcg_at_10_scores = []
 
+    skipped = 0
     for i, example in enumerate(dataset):
         query = example["query"]
-        relevant_ids = set(example["relevant_chunk_ids"])
+        relevant_ids = _resolve_relevant_indices(example, id_map, title_section_map, title_map)
+        if not relevant_ids:
+            print(f"Warning: Skipping query {i+1} ('{query}') - no matching relevant chunks found.")
+            skipped += 1
+            continue
 
         try:
             # Retrieve chunks using RAG system
+            retrieved_ids = list(retrieval_fn(query)) if retrieval_fn else []
             selected, _ = retrieve(query, chunks, vecs_n, bm, top_k=12, hnsw=hnsw)
             retrieved_ids = list(selected)
 
@@ -156,8 +339,8 @@ def evaluate(dataset_path="eval_dataset.jsonl", verbose=False):
                 print(f"  MRR:         {mrr:.3f}")
                 print(f"  Precision@5: {precision_at_5:.3f}")
                 print(f"  NDCG@10:     {ndcg_at_10:.3f}")
-                print(f"  Retrieved:   {retrieved_ids[:5]}")
-                print(f"  Relevant:    {list(relevant_ids)}")
+                print(f"  Retrieved idx: {retrieved_ids[:5]}")
+                print(f"  Relevant idx:  {sorted(relevant_ids)}")
 
         except Exception as e:
             print(f"Error evaluating query '{query}': {e}")
@@ -175,10 +358,18 @@ def evaluate(dataset_path="eval_dataset.jsonl", verbose=False):
     }
 
     # Print results
+    processed = len(mrr_scores)
+    if processed == 0:
+        print("Error: No evaluation queries were processed. Check dataset annotations.")
+        sys.exit(1)
+
     print("\n" + "="*70)
-    print("RAG EVALUATION RESULTS")
+    mode = "Hybrid RAG" if rag_available else "Lexical BM25"
+    print(f"RAG EVALUATION RESULTS ({mode})")
     print("="*70)
     print(f"Dataset size:    {results['dataset_size']}")
+    if skipped:
+        print(f"Skipped queries: {skipped} (missing relevance annotations)")
     print(f"MRR@10:          {results['mrr_at_10']:.3f} (±{results['mrr_std']:.3f})")
     print(f"Precision@5:     {results['precision_at_5']:.3f} (±{results['precision_std']:.3f})")
     print(f"NDCG@10:         {results['ndcg_at_10']:.3f} (±{results['ndcg_std']:.3f})")
@@ -186,6 +377,11 @@ def evaluate(dataset_path="eval_dataset.jsonl", verbose=False):
 
     # Interpretation
     print("\nINTERPRETATION:")
+    if results['mrr_at_10'] >= SUCCESS_THRESHOLDS['mrr_at_10']:
+        print(
+            f"✅ MRR@10 ≥ {SUCCESS_THRESHOLDS['mrr_at_10']:.2f}: "
+            "Excellent - first relevant result typically in top 2"
+        )
     if results['mrr_at_10'] >= MRR_THRESHOLD:
         print(f"✅ MRR@10 ≥ {MRR_THRESHOLD:.2f}: Excellent - first relevant result typically in top 2")
     elif results['mrr_at_10'] >= 0.50:
@@ -193,6 +389,11 @@ def evaluate(dataset_path="eval_dataset.jsonl", verbose=False):
     else:
         print("❌ MRR@10 < 0.50: Needs improvement - relevant results ranked too low")
 
+    if results['precision_at_5'] >= SUCCESS_THRESHOLDS['precision_at_5']:
+        print(
+            f"✅ Precision@5 ≥ {SUCCESS_THRESHOLDS['precision_at_5']:.2f}: "
+            "Excellent - majority of top 5 are relevant"
+        )
     if results['precision_at_5'] >= PRECISION_THRESHOLD:
         print(f"✅ Precision@5 ≥ {PRECISION_THRESHOLD:.2f}: Excellent - majority of top 5 are relevant")
     elif results['precision_at_5'] >= 0.40:
@@ -200,6 +401,11 @@ def evaluate(dataset_path="eval_dataset.jsonl", verbose=False):
     else:
         print("❌ Precision@5 < 0.40: Needs improvement - too many irrelevant results")
 
+    if results['ndcg_at_10'] >= SUCCESS_THRESHOLDS['ndcg_at_10']:
+        print(
+            f"✅ NDCG@10 ≥ {SUCCESS_THRESHOLDS['ndcg_at_10']:.2f}: "
+            "Excellent - relevant results well-ranked"
+        )
     if results['ndcg_at_10'] >= NDCG_THRESHOLD:
         print(f"✅ NDCG@10 ≥ {NDCG_THRESHOLD:.2f}: Excellent - relevant results well-ranked")
     elif results['ndcg_at_10'] >= 0.50:
@@ -211,15 +417,54 @@ def evaluate(dataset_path="eval_dataset.jsonl", verbose=False):
 
 
 if __name__ == "__main__":
-    import argparse
-
     parser = argparse.ArgumentParser(description="Evaluate RAG system on ground truth dataset")
-    parser.add_argument("--dataset", default="eval_dataset.jsonl", help="Path to evaluation dataset")
+    parser.add_argument(
+        "--dataset",
+        default="eval_datasets/clockify_v1.jsonl",
+        help="Path to evaluation dataset",
+    )
     parser.add_argument("--verbose", "-v", action="store_true", help="Print per-query results")
+    parser.add_argument(
+        "--min-mrr",
+        type=float,
+        default=SUCCESS_THRESHOLDS["mrr_at_10"],
+        help="Minimum acceptable MRR@10 (default: %(default).2f)",
+    )
+    parser.add_argument(
+        "--min-precision",
+        type=float,
+        default=SUCCESS_THRESHOLDS["precision_at_5"],
+        help="Minimum acceptable Precision@5 (default: %(default).2f)",
+    )
+    parser.add_argument(
+        "--min-ndcg",
+        type=float,
+        default=SUCCESS_THRESHOLDS["ndcg_at_10"],
+        help="Minimum acceptable NDCG@10 (default: %(default).2f)",
+    )
     args = parser.parse_args()
 
     results = evaluate(dataset_path=args.dataset, verbose=args.verbose)
 
+    thresholds = {
+        "mrr_at_10": args.min_mrr,
+        "precision_at_5": args.min_precision,
+        "ndcg_at_10": args.min_ndcg,
+    }
+
+    success = all(results[key] >= threshold for key, threshold in thresholds.items())
+    if not success:
+        print(
+            "\nEvaluation thresholds not met:" +
+            " ".join(
+                f"{key}={results[key]:.3f} < {threshold:.2f}"
+                for key, threshold in thresholds.items()
+                if results[key] < threshold
+            )
+        )
+        sys.exit(1)
+
+    sys.exit(0)
     # Exit with appropriate code based on results
     if (
         results['mrr_at_10'] >= MRR_THRESHOLD

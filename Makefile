@@ -70,8 +70,8 @@ test:
 	python3 -m pytest tests/ -v --cov=clockify_support_cli_final --cov-report=term-missing --cov-report=html
 
 eval:
-	@echo "Running RAG evaluation on ground truth dataset..."
-	python3 eval.py
+        @echo "Running RAG evaluation on ground truth dataset..."
+        python3 eval.py --dataset eval_datasets/clockify_v1.jsonl
 
 benchmark:
 	@echo "Running performance benchmarks..."

@@ -1,0 +1,39 @@
+name: Evaluation
+
+on:
+  push:
+    branches: [ main, master, develop, 'claude/**' ]
+  pull_request:
+    branches: [ main, master, develop ]
+
+jobs:
+  eval:
+    name: RAG evaluation
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install evaluation dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install numpy==2.3.4 requests==2.32.5 rank-bm25==0.2.2 nltk==3.9.1
+
+      - name: Download NLTK tokenizers
+        run: |
+          python - <<'PY'
+          import nltk
+          nltk.download('punkt', quiet=True)
+          nltk.download('punkt_tab', quiet=True)
+          PY
+
+      - name: Run evaluation
+        run: |
+          python eval.py --dataset eval_datasets/clockify_v1.jsonl

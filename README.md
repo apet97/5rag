@@ -277,6 +277,37 @@ python3 clockify_support_cli.py chat --det-check --seed 42
 python3 clockify_support_cli.py --log DEBUG chat
 ```
 
+### Automated Evaluation
+
+Ground-truth retrieval metrics are tracked via `eval.py`. The evaluator works in
+both full and lightweight environments:
+
+```bash
+# Uses the populated dataset in eval_datasets/
+python3 eval.py --dataset eval_datasets/clockify_v1.jsonl
+
+# Enable verbose per-query breakdown
+python3 eval.py --dataset eval_datasets/clockify_v1.jsonl --verbose
+```
+
+Key details:
+
+- ✅ **Hybrid mode** – If the production index artifacts (`chunks.jsonl`,
+  `vecs_n.npy`, `bm25.json`) are present, the script evaluates the full hybrid
+  retrieval pipeline (`retrieve`).
+- ✅ **Lexical fallback** – When embeddings are unavailable (e.g. in CI), the
+  script re-chunks `knowledge_full.md` and evaluates using a BM25 index built
+  with `rank-bm25`. Only lightweight dependencies are required: `numpy`,
+  `requests`, `nltk`, and `rank-bm25`.
+- ✅ **Stable relevance labels** – `eval_datasets/clockify_v1.jsonl` stores
+  `title` + `section` pairs instead of raw chunk IDs so the dataset remains
+  stable across rebuilds.
+- ✅ **Thresholds** – Builds fail when any metric drops below the default
+  thresholds: `MRR@10 ≥ 0.70`, `Precision@5 ≥ 0.55`, `NDCG@10 ≥ 0.60`.
+
+See [eval_datasets/README.md](eval_datasets/README.md) for dataset details and
+label generation.
+
 ## Statistics
 
 | Metric | Value |
