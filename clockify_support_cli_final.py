@@ -45,6 +45,10 @@ class IndexError(Exception):
     """Index loading or validation failed"""
     pass
 
+class BuildError(Exception):
+    """Knowledge base build failed"""
+    pass
+
 # ====== CONFIG ======
 # These are module-level defaults, overridable via main()
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
@@ -970,20 +974,18 @@ def embed_texts(texts, retries=0):
             resp_json = r.json()
             emb = resp_json.get("embedding", [])
             if not emb or len(emb) == 0:
-                logger.error(f"Embedding chunk {i}: empty embedding returned (check Ollama API format)")
-                sys.exit(1)
+                raise EmbeddingError(f"Embedding chunk {i}: empty embedding returned (check Ollama API format)")
 
             vecs.append(emb)
         except (requests.exceptions.ConnectTimeout, requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
-            logger.error(f"Embedding chunk {i} failed: {e} "
-                       f"[hint: check OLLAMA_URL or increase EMB timeouts]")
-            sys.exit(1)
+            raise EmbeddingError(f"Embedding chunk {i} failed: {e} [hint: check OLLAMA_URL or increase EMB timeouts]") from e
         except requests.exceptions.RequestException as e:
-            logger.error(f"Embedding chunk {i} request failed: {e}")
-            sys.exit(1)
+            raise EmbeddingError(f"Embedding chunk {i} request failed: {e}") from e
+        except EmbeddingError:
+            raise  # Re-raise EmbeddingError
         except Exception as e:
-            logger.error(f"Embedding chunk {i}: {e}")
-            sys.exit(1)
+            raise EmbeddingError(f"Embedding chunk {i}: {e}") from e
+
     return np.array(vecs, dtype="float32")
 
 # ====== BM25 ======
@@ -1072,15 +1074,11 @@ def embed_query(question: str, retries=0) -> np.ndarray:
         qv_norm = np.linalg.norm(qv)
         return qv / (qv_norm if qv_norm > 0 else 1.0)
     except (requests.exceptions.ConnectTimeout, requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
-        logger.error(f"Query embedding failed: {e} "
-                   f"[hint: check OLLAMA_URL or increase EMB timeouts]")
-        sys.exit(1)
+        raise EmbeddingError(f"Query embedding failed: {e} [hint: check OLLAMA_URL or increase EMB timeouts]") from e
     except requests.exceptions.RequestException as e:
-        logger.error(f"Query embedding request failed: {e}")
-        sys.exit(1)
+        raise EmbeddingError(f"Query embedding request failed: {e}") from e
     except Exception as e:
-        logger.error(f"Query embedding failed: {e}")
-        sys.exit(1)
+        raise EmbeddingError(f"Query embedding failed: {e}") from e
 
 def retrieve(question: str, chunks, vecs_n, bm, top_k=12, hnsw=None, retries=0):
     """Hybrid retrieval: dense + BM25 + dedup. Optionally uses FAISS/HNSW for fast K-NN.
@@ -1361,15 +1359,11 @@ def ask_llm(question: str, snippets_block: str, seed=DEFAULT_SEED, num_ctx=DEFAU
             return msg
         return j.get("response", "")
     except (requests.exceptions.ConnectTimeout, requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
-        logger.error(f"LLM call failed: {e} "
-                   f"[hint: check OLLAMA_URL or increase CHAT timeouts]")
-        sys.exit(1)
+        raise LLMError(f"LLM call failed: {e} [hint: check OLLAMA_URL or increase CHAT timeouts]") from e
     except requests.exceptions.RequestException as e:
-        logger.error(f"LLM request failed: {e}")
-        sys.exit(1)
+        raise LLMError(f"LLM request failed: {e}") from e
     except Exception as e:
-        logger.error(f"Unexpected error in LLM call: {e}")
-        sys.exit(1)
+        raise LLMError(f"Unexpected error in LLM call: {e}") from e
 
 # ====== BUILD PIPELINE ======
 def build(md_path: str, retries=0):
@@ -1379,8 +1373,7 @@ def build(md_path: str, retries=0):
         logger.info("BUILDING KNOWLEDGE BASE")
         logger.info("=" * 70)
         if not os.path.exists(md_path):
-            logger.error(f"{md_path} not found")
-            sys.exit(1)
+            raise BuildError(f"{md_path} not found")
 
         logger.info("\n[1/4] Parsing and chunking...")
         chunks = build_chunks(md_path)
@@ -2052,9 +2045,12 @@ def answer_once(
         )
 
         return ans, {"selected": ids}
+    except (EmbeddingError, LLMError, BuildError):
+        # Re-raise specific exceptions
+        raise
     except Exception as e:
-        logger.error(f"{e}")
-        sys.exit(1)
+        # Wrap unexpected exceptions with context
+        raise RuntimeError(f"Unexpected error in answer_once: {e}") from e
 
 # ====== TASK J: SELF-TESTS (7 Tests) ======
 def test_mmr_behavior_ok():
