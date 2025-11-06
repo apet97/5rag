@@ -1229,7 +1229,7 @@ def bm25_scores(query: str, bm, k1=None, b=None, top_k=None):
     doc_tfs = bm["doc_tfs"]
 
     # Rank 24: Early termination with Wand-like pruning
-    if top_k is not None and top_k > 0 and len(doc_lens) > top_k * 2:
+    if top_k is not None and top_k > 0 and len(doc_lens) > top_k * 1.5:  # Lower threshold for earlier termination
         # Compute upper bound per query term (max possible contribution)
         # Upper bound = IDF * (k1 + 1) when term frequency is very high
         term_upper_bounds = {}
@@ -1919,6 +1919,19 @@ def load_index():
         logger.warning(f"[rebuild] Failed to load BM25: {e}")
         return None
 
+    # 4.5. Preload FAISS index if enabled (Quick Win #2)
+    global _FAISS_INDEX
+    if USE_ANN == "faiss" and os.path.exists(FILES["faiss_index"]):
+        try:
+            _FAISS_INDEX = load_faiss_index(FILES["faiss_index"])
+            if _FAISS_INDEX:
+                logger.info(f"✓ Preloaded FAISS index: nprobe={ANN_NPROBE}")
+            else:
+                logger.info("FAISS index file exists but failed to load, will fall back")
+        except Exception as e:
+            logger.warning(f"Failed to preload FAISS: {e}, will lazy-load on first query")
+            _FAISS_INDEX = None
+
     # 5. Cross-check: embeddings and chunks must match
     if vecs_n.shape[0] != len(chunks):
         logger.warning(f"[rebuild] Embedding-chunk mismatch: {vecs_n.shape[0]} embeddings vs {len(chunks)} chunks")
@@ -2426,6 +2439,9 @@ def answer_once(
         # Add cache indicator to metadata
         metadata["cached"] = True
         metadata["cache_hit"] = True
+        # Quick Win #9: Add cache hit logging
+        cache_age = time.time() - metadata.get("timestamp", time.time())
+        logger.info(f"[cache] HIT question_len={len(question)} cache_age={cache_age:.1f}s")
         return answer, metadata
 
     turn_start = time.time()

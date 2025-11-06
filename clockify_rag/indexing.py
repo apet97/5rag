@@ -173,7 +173,7 @@ def bm25_scores(query: str, bm: dict, k1: float = None, b: float = None, top_k: 
     doc_tfs = bm["doc_tfs"]
 
     # Rank 24: Early termination with Wand-like pruning
-    if top_k is not None and top_k > 0 and len(doc_lens) > top_k * 2:
+    if top_k is not None and top_k > 0 and len(doc_lens) > top_k * 1.5:  # Lower threshold for earlier termination
         import heapq
         term_upper_bounds = {}
         for w in q:
