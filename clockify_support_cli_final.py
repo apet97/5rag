@@ -38,6 +38,7 @@ import re
 import subprocess
 import sys
 import tempfile
+from typing import Any, Optional
 import threading
 import time
 import unicodedata
@@ -151,6 +152,7 @@ REFUSAL_STR = "I don't know based on the MD."
 
 # Query logging configuration
 QUERY_LOG_FILE = os.environ.get("RAG_LOG_FILE", "rag_queries.jsonl")
+QUERY_LOG_DISABLED = os.environ.get("RAG_NO_LOG", "").lower() in {"1", "true", "yes", "on"}
 
 FILES = {
     "chunks": "chunks.jsonl",
@@ -470,14 +472,23 @@ def log_kpi(topk: int, packed: int, used_tokens: int, rerank_applied: bool, rera
     logger.info(f"kpi {kpi_line}")
 
 # ====== JSON OUTPUT (v4.1 - Section 9) ======
-def answer_to_json(answer: str, citations: list, used_tokens: int, topk: int, packed: int) -> dict:
-    """Convert answer and metadata to JSON structure."""
+def answer_to_json(answer: str, citations: list, used_tokens: int | None, topk: int, packed: int) -> dict:
+    """Convert answer and metadata to JSON structure.
+
+    Args:
+        answer: Generated answer text.
+        citations: Sequence of citation identifiers (chunk IDs).
+        used_tokens: Actual token budget consumed when packing context.
+        topk: Retrieval depth requested.
+        packed: Maximum number of snippets packed.
+    """
+    budget_tokens = 0 if used_tokens is None else int(used_tokens)
     return {
         "answer": answer,
         "citations": citations,
         "debug": {
             "meta": {
-                "used_tokens": used_tokens,
+                "used_tokens": budget_tokens,
                 "topk": topk,
                 "packed": packed,
                 "emb_backend": EMB_BACKEND,
@@ -702,11 +713,13 @@ def check_pytorch_mps():
 def _log_config_summary(use_rerank=False, pack_top=DEFAULT_PACK_TOP, seed=DEFAULT_SEED, threshold=DEFAULT_THRESHOLD, top_k=DEFAULT_TOP_K, num_ctx=DEFAULT_NUM_CTX, num_predict=DEFAULT_NUM_PREDICT, retries=0):
     """Log configuration summary at startup - Task I."""
     proxy_trust = 1 if os.getenv("ALLOW_PROXIES") == "1" else 0
+    log_target = "off" if QUERY_LOG_DISABLED else pathlib.Path(QUERY_LOG_FILE).resolve()
     # Task I: Single-line CONFIG banner
     logger.info(
         f"CONFIG model={GEN_MODEL} emb={EMB_MODEL} topk={top_k} pack={pack_top} thr={threshold} "
         f"seed={seed} ctx={num_ctx} pred={num_predict} retries={retries} "
         f"timeouts=(3,{int(EMB_READ_T)}/{int(CHAT_READ_T)}/{int(RERANK_READ_T)}) "
+        f"log={log_target} "
         f"trust_env={proxy_trust} rerank={1 if use_rerank else 0}"
     )
     # Task I: Print refusal string once for sanity
@@ -1411,7 +1424,61 @@ def embed_query(question: str, retries=0) -> np.ndarray:
     except Exception as e:
         raise EmbeddingError(f"Query embedding failed: {e}") from e
 
-def retrieve(question: str, chunks, vecs_n, bm, top_k=12, hnsw=None, retries=0) -> tuple[list[int], dict[str, np.ndarray]]:
+class DenseScoreStore:
+    """Container for dense similarity scores with optional lazy materialization."""
+
+    __slots__ = ("_length", "_full", "_vecs", "_qv", "_cache")
+
+    def __init__(self, length: int, *, full_scores: Optional[np.ndarray] = None,
+                 vecs: Optional[np.ndarray] = None, qv: Optional[np.ndarray] = None,
+                 initial: Optional[list[tuple[int, float]]] = None) -> None:
+        self._length = int(length)
+        self._full: Optional[np.ndarray] = None
+        self._vecs = vecs
+        self._qv = qv
+        self._cache: dict[int, float] = {}
+
+        if full_scores is not None:
+            self._full = np.asarray(full_scores, dtype="float32")
+        elif initial:
+            self._cache.update({int(idx): float(score) for idx, score in initial})
+
+    def __len__(self) -> int:  # pragma: no cover - trivial
+        return self._length
+
+    def _materialize_full(self) -> np.ndarray:
+        if self._full is None:
+            if self._vecs is None or self._qv is None:
+                self._full = np.zeros(self._length, dtype="float32")
+            else:
+                self._full = self._vecs.dot(self._qv).astype("float32")
+        return self._full
+
+    def __getitem__(self, idx: int) -> float:
+        idx = int(idx)
+        if idx < 0 or idx >= self._length:
+            raise IndexError(idx)
+
+        if self._full is not None:
+            return float(self._full[idx])
+
+        if idx not in self._cache:
+            if self._vecs is None or self._qv is None:
+                raise KeyError(idx)
+            self._cache[idx] = float(self._vecs[idx].dot(self._qv))
+        return self._cache[idx]
+
+    def get(self, idx: int, default: Optional[float] = None) -> Optional[float]:
+        try:
+            return self[idx]
+        except (IndexError, KeyError):
+            return default
+
+    def to_array(self) -> np.ndarray:
+        return self._materialize_full().copy()
+
+
+def retrieve(question: str, chunks, vecs_n, bm, top_k=12, hnsw=None, retries=0) -> tuple[list[int], dict[str, Any]]:
     """Hybrid retrieval: dense + BM25 + dedup. Optionally uses FAISS/HNSW for fast K-NN.
 
     Scoring: hybrid = ALPHA_HYBRID * normalize(BM25) + (1 - ALPHA_HYBRID) * normalize(dense)
@@ -1440,11 +1507,20 @@ def retrieve(question: str, chunks, vecs_n, bm, top_k=12, hnsw=None, retries=0) 
         else:
             logger.info("info: ann=fallback reason=missing-index")
 
+    dense_scores_full = None
+    candidate_idx: list[int] = []
+
     # Use FAISS if available for fast candidate generation
     if _FAISS_INDEX:
-        D, I = _FAISS_INDEX.search(qv_n.reshape(1, -1).astype("float32"), max(ANN_CANDIDATE_MIN, top_k * FAISS_CANDIDATE_MULTIPLIER))
-        candidate_idx = [int(i) for i in I[0] if i >= 0]
-        dense_scores = np.array([float(d) for d in D[0][:len(candidate_idx)]])
+        D, I = _FAISS_INDEX.search(
+            qv_n.reshape(1, -1).astype("float32"),
+            max(ANN_CANDIDATE_MIN, top_k * FAISS_CANDIDATE_MULTIPLIER)
+        )
+        distances = np.asarray(D[0], dtype="float32")
+        indices = np.asarray(I[0], dtype=np.int64)
+        mask = indices >= 0
+        candidate_idx = indices[mask].astype(int).tolist()
+        dense_scores = distances[mask]
     # Fallback to HNSW if available
     elif hnsw:
         _, cand = hnsw.knn_query(qv_n, k=max(ANN_CANDIDATE_MIN, top_k * FAISS_CANDIDATE_MULTIPLIER))
@@ -1454,26 +1530,37 @@ def retrieve(question: str, chunks, vecs_n, bm, top_k=12, hnsw=None, retries=0) 
     else:
         # Task H: dense scoring uses np.dot with float32
         dense_scores = vecs_n.dot(qv_n)
-        candidate_idx = np.arange(len(chunks))
+        candidate_idx = np.arange(len(chunks)).tolist()
 
-    # Compute full scores once for reuse (performance optimization)
-    dense_scores_full = vecs_n.dot(qv_n)
+    if not candidate_idx:
+        dense_scores_full = vecs_n.dot(qv_n)
+        candidate_idx = np.arange(len(chunks)).tolist()
+        dense_scores = dense_scores_full
+
+    candidate_idx_array = np.array(candidate_idx, dtype=np.int32)
     # Use expanded query for BM25 (keyword matching benefits from synonyms)
     # Rank 24: Pass top_k for early termination on large corpora
     bm_scores_full = bm25_scores(expanded_question, bm, top_k=top_k * 3)
 
     # Normalize once, then slice for candidates (avoids 4x redundant normalization)
-    zs_dense_full = normalize_scores_zscore(dense_scores_full)
     zs_bm_full = normalize_scores_zscore(bm_scores_full)
-
-    # Slice cached scores for candidates
-    zs_dense = zs_dense_full[candidate_idx] if (_FAISS_INDEX or hnsw) else zs_dense_full
-    zs_bm = zs_bm_full[candidate_idx] if (_FAISS_INDEX or hnsw) else zs_bm_full
+    zs_dense_full = None
+    if dense_scores_full is not None:
+        dense_scores_full = np.asarray(dense_scores_full, dtype="float32")
+        zs_dense_full = normalize_scores_zscore(dense_scores_full)
+        zs_dense = zs_dense_full[candidate_idx_array] if candidate_idx_array.size else np.array([], dtype="float32")
+    else:
+        dense_scores = np.asarray(dense_scores, dtype="float32")
+        zs_dense = normalize_scores_zscore(dense_scores)
+    zs_bm = zs_bm_full[candidate_idx_array] if candidate_idx_array.size else np.array([], dtype="float32")
 
     # v4.1: Use configurable ALPHA_HYBRID for blending
     hybrid = ALPHA_HYBRID * zs_bm + (1 - ALPHA_HYBRID) * zs_dense
-    top_idx = np.argsort(hybrid)[::-1][:top_k]
-    top_idx = np.array(candidate_idx)[top_idx]  # Map back to original indices
+    if hybrid.size:
+        top_positions = np.argsort(hybrid)[::-1][:top_k]
+        top_idx = candidate_idx_array[top_positions]
+    else:
+        top_idx = np.array([], dtype=np.int32)
 
     seen = set()
     filtered = []
@@ -1485,10 +1572,23 @@ def retrieve(question: str, chunks, vecs_n, bm, top_k=12, hnsw=None, retries=0) 
         filtered.append(i)
 
     # Reuse cached normalized scores for full hybrid (already computed above)
-    hybrid_full = ALPHA_HYBRID * zs_bm_full + (1 - ALPHA_HYBRID) * zs_dense_full
+    if zs_dense_full is not None:
+        hybrid_full = ALPHA_HYBRID * zs_bm_full + (1 - ALPHA_HYBRID) * zs_dense_full
+    else:
+        hybrid_full = np.zeros(len(chunks), dtype="float32")
+        for idx, score in zip(candidate_idx, hybrid):
+            hybrid_full[idx] = score
+
+    if dense_scores_full is not None:
+        dense_scores_store = DenseScoreStore(len(chunks), full_scores=dense_scores_full)
+    else:
+        dense_scores_store = DenseScoreStore(
+            len(chunks), vecs=vecs_n, qv=qv_n,
+            initial=list(zip(candidate_idx, dense_scores))
+        )
 
     return filtered, {
-        "dense": dense_scores_full,
+        "dense": dense_scores_store,
         "bm25": bm_scores_full,
         "hybrid": hybrid_full
     }
@@ -2133,7 +2233,7 @@ class QueryCache:
         """
         self.maxsize = maxsize
         self.ttl_seconds = ttl_seconds
-        self.cache: dict[str, tuple[str, dict, float]] = {}  # {question_hash: (answer, metadata, timestamp)}
+        self.cache: dict[str, tuple[str, dict, float]] = {}  # {question_hash: (answer, metadata_with_timestamp, timestamp)}
         self.access_order: deque[str] = deque()  # For LRU eviction
         self.hits = 0
         self.misses = 0
@@ -2158,6 +2258,13 @@ class QueryCache:
 
             answer, metadata, timestamp = self.cache[key]
             age = time.time() - timestamp
+        answer, metadata, timestamp = self.cache[key]
+        metadata_timestamp = metadata.get("timestamp")
+        if metadata_timestamp is None:
+            metadata_timestamp = timestamp
+            metadata["timestamp"] = metadata_timestamp
+
+        age = time.time() - metadata_timestamp
 
             # Check if expired
             if age > self.ttl_seconds:
@@ -2192,6 +2299,11 @@ class QueryCache:
 
             # Store entry with timestamp
             self.cache[key] = (answer, metadata, time.time())
+        # Store entry with timestamp
+        timestamp = time.time()
+        metadata = dict(metadata) if metadata is not None else {}
+        metadata["timestamp"] = timestamp
+        self.cache[key] = (answer, metadata, timestamp)
 
             # Update access order
             if key in self.access_order:
@@ -2244,6 +2356,9 @@ def log_query(query, answer, retrieved_chunks, latency_ms, refused=False, metada
         refused: Whether answer was refused (returned REFUSAL_STR)
         metadata: Optional dict with additional metadata (debug, backend, etc.)
     """
+    if QUERY_LOG_DISABLED:
+        return
+
     # Extract chunk IDs and scores
     chunk_ids = [c["id"] if isinstance(c, dict) else c for c in retrieved_chunks]
     chunk_scores = [c.get("score", 0.0) if isinstance(c, dict) else 0.0 for c in retrieved_chunks]
@@ -2457,14 +2572,14 @@ def answer_once(
         question = sanitize_question(question)
     except ValueError as e:
         logger.warning(f"Invalid question: {e}")
-        return f"Invalid question: {e}", {"selected": [], "scores": [], "timings": {}, "refused": False}
+        return f"Invalid question: {e}", {"selected": [], "scores": [], "timings": {}, "refused": False, "used_tokens": 0}
 
     # Check rate limit
     if not RATE_LIMITER.allow_request():
         wait_seconds = RATE_LIMITER.wait_time()
         logger.warning(f"Rate limit exceeded, wait {wait_seconds:.0f}s")
         return f"Rate limit exceeded. Please wait {wait_seconds:.0f} seconds before next query.", {
-            "selected": [], "scores": [], "timings": {}, "refused": False, "rate_limited": True
+            "selected": [], "scores": [], "timings": {}, "refused": False, "rate_limited": True, "used_tokens": 0
         }
 
     # Check query cache (Rank 14: 100% speedup on repeated queries)
@@ -2473,6 +2588,7 @@ def answer_once(
         answer, cached_metadata = cached_result
         # Work on a copy so cached metadata (including timestamp) remains intact
         metadata = dict(cached_metadata) if cached_metadata is not None else {}
+        metadata.setdefault("used_tokens", 0)
         metadata["cached"] = True
         metadata["cache_hit"] = True
         # Quick Win #9: Add cache hit logging
@@ -2503,6 +2619,11 @@ def answer_once(
 
         # Step 4: Coverage check
         coverage_pass = coverage_ok(mmr_selected, scores["dense"], threshold)
+        chunk_id_to_index = {
+            chunk.get("id"): idx
+            for idx, chunk in enumerate(chunks)
+            if isinstance(chunk, dict) and "id" in chunk
+        }
         if not coverage_pass:
             if debug:
                 print(f"\n[DEBUG] Coverage failed: {len(mmr_selected)} selected, need ≥2 @ {threshold}")
@@ -2510,17 +2631,38 @@ def answer_once(
 
             # Log refusal
             latency_ms = int((time.time() - turn_start) * 1000)
+            dense_scores = scores.get("dense", np.zeros(len(chunks), dtype=np.float32))
+            retrieved_chunks = []
+            for idx in mmr_selected:
+                if not isinstance(idx, (int, np.integer)):
+                    continue
+                if idx < 0 or idx >= len(chunks) or idx >= len(dense_scores):
+                    continue
+                chunk = chunks[idx]
+                if not isinstance(chunk, dict):
+                    continue
+                chunk_id = chunk.get("id")
+                if chunk_id is None:
+                    continue
+                retrieved_chunks.append(
+                    {
+                        "id": chunk_id,
+                        "score": float(dense_scores[idx]),
+                        "chunk": chunk,
+                    }
+                )
+
             log_query(
                 query=question,
                 answer=REFUSAL_STR,
-                retrieved_chunks=mmr_selected,
+                retrieved_chunks=retrieved_chunks,
                 latency_ms=latency_ms,
                 refused=True,
                 metadata={"debug": debug, "backend": EMB_BACKEND, "coverage_pass": False}
             )
 
             # Cache refusal (Rank 14)
-            refusal_metadata = {"selected": [], "refused": True, "cached": False, "cache_hit": False}
+            refusal_metadata = {"selected": [], "refused": True, "cached": False, "cache_hit": False, "used_tokens": 0}
             refusal_metadata["timestamp"] = time.time()
             QUERY_CACHE.put(question, REFUSAL_STR, refusal_metadata)
 
@@ -2582,14 +2724,22 @@ def answer_once(
 
         # Log successful query
         latency_ms = int(timings['total'] * 1000)
-        chunk_id_to_index = {chunk["id"]: idx for idx, chunk in enumerate(chunks)}
         dense_scores = scores["dense"]
-        retrieved_chunks = [
-            {"id": cid, "score": float(dense_scores[idx])}
-            for cid in ids
-            for idx in [chunk_id_to_index.get(cid)]
-            if idx is not None and 0 <= idx < len(dense_scores)
-        ]
+        retrieved_chunks = []
+        for cid in ids:
+            idx = chunk_id_to_index.get(cid)
+            if idx is None or idx < 0 or idx >= len(chunks) or idx >= len(dense_scores):
+                continue
+            chunk = chunks[idx]
+            if not isinstance(chunk, dict):
+                continue
+            retrieved_chunks.append(
+                {
+                    "id": cid,
+                    "score": float(dense_scores[idx]),
+                    "chunk": chunk,
+                }
+            )
 
         log_query(
             query=question,
@@ -2633,19 +2783,82 @@ def answer_once(
 
 # ====== TASK J: SELF-TESTS (7 Tests) ======
 def test_mmr_behavior_ok():
-    """Verify MMR inline logic applies diversification - Task J."""
-    # Synthetic test: create mock vectors and scores where MMR should reorder
-    import inspect
+    """Verify MMR diversification produces diverse selections with rerank enabled."""
 
-    # Verify MMR logic exists in answer_once (inlined)
-    source = inspect.getsource(answer_once)
-    assert "mmr_gain" in source, "MMR gain function not found in answer_once"
-    assert "MMR_LAMBDA" in source, "MMR_LAMBDA not used in answer_once"
-    assert "max(float(vecs_n[j].dot(vecs_n[k]))" in source, "MMR diversity term not found"
+    # Synthetic knowledge base with three chunks – two are similar, one is orthogonal
+    chunks = [
+        {"id": "chunk-0", "title": "Doc A", "section": "S1", "url": "", "text": "Details A"},
+        {"id": "chunk-1", "title": "Doc A", "section": "S1", "url": "", "text": "More A"},
+        {"id": "chunk-2", "title": "Doc B", "section": "S2", "url": "", "text": "Details B"},
+    ]
 
-    # Verify reranking integration
-    assert "rerank_with_llm" in source, "Reranker not called"
-    assert "use_rerank" in source, "use_rerank flag not checked"
+    base_vecs = np.array([
+        [1.0, 0.0],
+        [0.99, 0.0],  # Nearly identical to chunk-0
+        [0.0, 1.0],   # Orthogonal for diversity
+    ], dtype=np.float32)
+    norms = np.linalg.norm(base_vecs, axis=1, keepdims=True)
+    vecs_n = base_vecs / np.where(norms == 0, 1, norms)
+
+    dense_scores = np.array([0.9, 0.85, 0.8], dtype=np.float32)
+    bm25_scores = np.array([0.2, 0.1, 0.05], dtype=np.float32)
+    hybrid_scores = 0.5 * dense_scores + 0.5 * bm25_scores
+
+    # Monkeypatch retrieve/rerank/ask to avoid network dependencies
+    original_retrieve = retrieve
+    original_rerank = rerank_with_llm
+    original_ask = ask_llm
+
+    rerank_probe = {}
+
+    def fake_retrieve(question, chunks_, vecs_n_, bm_, top_k=12, hnsw=None, retries=0):
+        return [0, 1, 2], {
+            "dense": dense_scores,
+            "bm25": bm25_scores,
+            "hybrid": hybrid_scores,
+        }
+
+    def fake_rerank(question, chunks_, selected, scores, seed=DEFAULT_SEED, num_ctx=DEFAULT_NUM_CTX, num_predict=DEFAULT_NUM_PREDICT, retries=0):
+        rerank_probe["mmr_selection"] = list(selected)
+        # Keep original order but record deterministic scores
+        rerank_scores = {idx: float(1.0 - 0.1 * pos) for pos, idx in enumerate(selected)}
+        return list(selected), rerank_scores, True, ""
+
+    def fake_ask_llm(question, snippets_block, seed=DEFAULT_SEED, num_ctx=DEFAULT_NUM_CTX, num_predict=DEFAULT_NUM_PREDICT, retries=0):
+        return json.dumps({"answer": "stub", "confidence": 100})
+
+    try:
+        globals()["retrieve"] = fake_retrieve
+        globals()["rerank_with_llm"] = fake_rerank
+        globals()["ask_llm"] = fake_ask_llm
+
+        answer, metadata = answer_once(
+            "What is covered?",
+            chunks,
+            vecs_n,
+            bm={},
+            top_k=3,
+            pack_top=2,
+            threshold=0.5,
+            use_rerank=True,
+            debug=False,
+            seed=123,
+            num_ctx=128,
+            num_predict=64,
+            retries=0,
+        )
+    finally:
+        globals()["retrieve"] = original_retrieve
+        globals()["rerank_with_llm"] = original_rerank
+        globals()["ask_llm"] = original_ask
+
+    assert answer.strip() == "stub"
+    # Ensure MMR fed reranker with diverse indices (chunk-0 then chunk-2)
+    assert rerank_probe.get("mmr_selection") == [0, 2]
+    # Packed selection should contain two unique chunks, excluding the duplicate chunk-1
+    assert metadata["selected"] == ["chunk-0", "chunk-2"]
+    assert len(set(metadata["selected"])) == 2
+    assert metadata["rerank_applied"] is True
     return True
 
 def test_pack_headroom_enforced():
@@ -2718,15 +2931,97 @@ def test_post_retry_logic():
     return True
 
 def test_rerank_applied_when_enabled():
-    """Verify reranker is called and influences order - Task J."""
-    import inspect
-    source = inspect.getsource(answer_once)
-    # Verify rerank conditional
-    assert "if use_rerank:" in source, "use_rerank conditional not found"
-    # Verify rerank function is called
-    assert "rerank_with_llm" in source, "rerank_with_llm not called"
-    # Verify result overwrites mmr_selected (v4.1: 4-tuple return)
-    assert "mmr_selected" in source and "rerank_with_llm" in source, "Rerank result not assigned to mmr_selected"
+    """Ensure reranking is gated by the use_rerank flag and updates metadata."""
+
+    chunks = [
+        {"id": "chunk-0", "title": "Doc A", "section": "S1", "url": "", "text": "Details A"},
+        {"id": "chunk-1", "title": "Doc B", "section": "S2", "url": "", "text": "Details B"},
+    ]
+    base_vecs = np.array([
+        [1.0, 0.0],
+        [0.0, 1.0],
+    ], dtype=np.float32)
+    vecs_n = base_vecs / np.linalg.norm(base_vecs, axis=1, keepdims=True)
+
+    dense_scores = np.array([0.9, 0.8], dtype=np.float32)
+    bm25_scores = np.array([0.1, 0.05], dtype=np.float32)
+    hybrid_scores = 0.5 * dense_scores + 0.5 * bm25_scores
+
+    original_retrieve = retrieve
+    original_rerank = rerank_with_llm
+    original_ask = ask_llm
+
+    calls = {"true": 0, "false": 0}
+
+    def fake_retrieve(question, chunks_, vecs_n_, bm_, top_k=12, hnsw=None, retries=0):
+        return [0, 1], {
+            "dense": dense_scores,
+            "bm25": bm25_scores,
+            "hybrid": hybrid_scores,
+        }
+
+    def fake_rerank(question, chunks_, selected, scores, seed=DEFAULT_SEED, num_ctx=DEFAULT_NUM_CTX, num_predict=DEFAULT_NUM_PREDICT, retries=0):
+        if "use" in question:
+            calls["true"] += 1
+        else:
+            calls["false"] += 1
+        rerank_scores = {idx: float(1.0 - 0.1 * pos) for pos, idx in enumerate(selected)}
+        return list(reversed(selected)), rerank_scores, True, ""
+
+    def fake_ask_llm(question, snippets_block, seed=DEFAULT_SEED, num_ctx=DEFAULT_NUM_CTX, num_predict=DEFAULT_NUM_PREDICT, retries=0):
+        return json.dumps({"answer": question, "confidence": 90})
+
+    try:
+        globals()["retrieve"] = fake_retrieve
+        globals()["rerank_with_llm"] = fake_rerank
+        globals()["ask_llm"] = fake_ask_llm
+
+        ans_true, meta_true = answer_once(
+            "use rerank please",
+            chunks,
+            vecs_n,
+            bm={},
+            top_k=2,
+            pack_top=2,
+            threshold=0.5,
+            use_rerank=True,
+            debug=False,
+            seed=7,
+            num_ctx=128,
+            num_predict=64,
+            retries=0,
+        )
+
+        ans_false, meta_false = answer_once(
+            "skip rerank",
+            chunks,
+            vecs_n,
+            bm={},
+            top_k=2,
+            pack_top=2,
+            threshold=0.5,
+            use_rerank=False,
+            debug=False,
+            seed=8,
+            num_ctx=128,
+            num_predict=64,
+            retries=0,
+        )
+    finally:
+        globals()["retrieve"] = original_retrieve
+        globals()["rerank_with_llm"] = original_rerank
+        globals()["ask_llm"] = original_ask
+
+    assert ans_true.strip() == "use rerank please"
+    assert ans_false.strip() == "skip rerank"
+    assert meta_true["rerank_applied"] is True
+    assert meta_false["rerank_applied"] is False
+    assert calls["true"] == 1
+    assert calls["false"] == 0
+    # Reranker reversed the order when enabled
+    assert meta_true["selected"] == ["chunk-1", "chunk-0"]
+    # When disabled, MMR order preserved (first chunk stays first)
+    assert meta_false["selected"][0] == "chunk-0"
     return True
 
 def run_selftest():
@@ -2760,12 +3055,9 @@ def run_selftest():
     return all(status == "PASS" for _, status in results)
 
 # ====== REPL ======
-def chat_repl(top_k=12, pack_top=6, threshold=0.30, use_rerank=False, debug=False, seed=DEFAULT_SEED, num_ctx=DEFAULT_NUM_CTX, num_predict=DEFAULT_NUM_PREDICT, retries=0, use_json=False):
-    """Stateless REPL loop - Task I. v4.1: JSON output support."""
-    # Task I: log config summary at startup
-    _log_config_summary(use_rerank=use_rerank, pack_top=pack_top, seed=seed, threshold=threshold, top_k=top_k, num_ctx=num_ctx, num_predict=num_predict, retries=retries)
+def ensure_index_ready(retries=0):
+    """Ensure retrieval artifacts are present and return loaded index components."""
 
-    # Lazy build and startup sanity check
     artifacts_ok = True
     for fname in [FILES["chunks"], FILES["emb"], FILES["meta"], FILES["bm25"], FILES["index_meta"]]:
         if not os.path.exists(fname):
@@ -2773,28 +3065,37 @@ def chat_repl(top_k=12, pack_top=6, threshold=0.30, use_rerank=False, debug=Fals
             break
 
     if not artifacts_ok:
-        logger.info(f"[rebuild] artifacts missing or invalid: building from knowledge_full.md...")
+        logger.info("[rebuild] artifacts missing or invalid: building from knowledge_full.md...")
         if os.path.exists("knowledge_full.md"):
             build("knowledge_full.md", retries=retries)
         else:
-            logger.error(f"knowledge_full.md not found")
-            sys.exit(1)
+            logger.error("knowledge_full.md not found")
+            raise SystemExit(1)
 
     result = load_index()
     if result is None:
-        logger.info(f"[rebuild] artifact validation failed: rebuilding...")
+        logger.info("[rebuild] artifact validation failed: rebuilding...")
         if os.path.exists("knowledge_full.md"):
             build("knowledge_full.md", retries=retries)
             result = load_index()
         else:
-            logger.error(f"knowledge_full.md not found")
-            sys.exit(1)
+            logger.error("knowledge_full.md not found")
+            raise SystemExit(1)
 
     if result is None:
-        logger.error(f"Failed to load artifacts after rebuild")
-        sys.exit(1)
+        logger.error("Failed to load artifacts after rebuild")
+        raise SystemExit(1)
 
-    chunks, vecs_n, bm, hnsw = result
+    return result
+
+
+def chat_repl(top_k=12, pack_top=6, threshold=0.30, use_rerank=False, debug=False, seed=DEFAULT_SEED, num_ctx=DEFAULT_NUM_CTX, num_predict=DEFAULT_NUM_PREDICT, retries=0, use_json=False):
+    """Stateless REPL loop - Task I. v4.1: JSON output support."""
+    # Task I: log config summary at startup
+    _log_config_summary(use_rerank=use_rerank, pack_top=pack_top, seed=seed, threshold=threshold, top_k=top_k, num_ctx=num_ctx, num_predict=num_predict, retries=retries)
+
+    # Lazy build and startup sanity check
+    chunks, vecs_n, bm, hnsw = ensure_index_ready(retries=retries)
 
     print("\n" + "=" * 70)
     print("CLOCKIFY SUPPORT – Local, Stateless, Closed-Book")
@@ -2838,13 +3139,10 @@ def chat_repl(top_k=12, pack_top=6, threshold=0.30, use_rerank=False, debug=Fals
         )
         # v4.1: JSON output support
         if use_json:
-            used_tokens = meta.get("used_tokens")
-            if used_tokens is None:
-                used_tokens = len(meta.get("selected", []))
             output = answer_to_json(
                 ans,
                 meta.get("selected", []),
-                used_tokens,
+                meta.get("used_tokens"),
                 top_k,
                 pack_top
             )
@@ -2886,7 +3184,7 @@ def warmup_on_startup():
 # ====== MAIN ======
 def main():
     # v4.1: Declare globals at function start (Section 7)
-    global EMB_BACKEND, USE_ANN, ALPHA_HYBRID
+    global EMB_BACKEND, USE_ANN, ALPHA_HYBRID, QUERY_LOG_DISABLED
 
     ap = argparse.ArgumentParser(
         prog="clockify_support_cli",
@@ -2896,6 +3194,8 @@ def main():
     # Global logging and config arguments
     ap.add_argument("--log", default="INFO", choices=["DEBUG", "INFO", "WARN"],
                     help="Logging level (default INFO)")
+    ap.add_argument("--no-log", action="store_true",
+                    help="Disable query log file writes (privacy mode)")
     ap.add_argument("--ollama-url", type=str, default=None,
                     help="Ollama endpoint (default from OLLAMA_URL env or http://127.0.0.1:11434)")
     ap.add_argument("--gen-model", type=str, default=None,
@@ -2939,6 +3239,25 @@ def main():
                    help="Hybrid scoring blend: alpha*BM25 + (1-alpha)*dense (default 0.5)")
     c.add_argument("--json", action="store_true", help="Output answer as JSON with metrics (v4.1)")
 
+    a = subparsers.add_parser("ask", help="Answer a single question and exit")
+    a.add_argument("question", help="Question to answer")
+    a.add_argument("--debug", action="store_true", help="Print retrieval diagnostics")
+    a.add_argument("--rerank", action="store_true", help="Enable LLM-based reranking")
+    a.add_argument("--topk", type=int, default=DEFAULT_TOP_K, help="Top-K candidates (default 12)")
+    a.add_argument("--pack", type=int, default=DEFAULT_PACK_TOP, help="Snippets to pack (default 6)")
+    a.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD, help="Cosine threshold (default 0.30)")
+    a.add_argument("--seed", type=int, default=DEFAULT_SEED, help="Random seed for LLM (default 42)")
+    a.add_argument("--num-ctx", type=int, default=DEFAULT_NUM_CTX, help="LLM context window (default 8192)")
+    a.add_argument("--num-predict", type=int, default=DEFAULT_NUM_PREDICT, help="LLM max generation tokens (default 512)")
+    a.add_argument("--retries", type=int, default=DEFAULT_RETRIES, help="Retries for transient errors (default 0)")
+    a.add_argument("--emb-backend", choices=["local", "ollama"], default=EMB_BACKEND,
+                   help="Embedding backend: local (SentenceTransformer) or ollama (default local)")
+    a.add_argument("--ann", choices=["faiss", "none"], default=USE_ANN,
+                   help="ANN index: faiss (IVFFlat) or none (full-scan, default faiss)")
+    a.add_argument("--alpha", type=float, default=ALPHA_HYBRID,
+                   help="Hybrid scoring blend: alpha*BM25 + (1-alpha)*dense (default 0.5)")
+    a.add_argument("--json", action="store_true", help="Output answer as JSON with metrics (v4.1)")
+
     # v4.1: Ollama optimization flags (Section 7)
     ap.add_argument("--emb-backend", choices=["local", "ollama"], default=EMB_BACKEND,
                    help="Embedding backend: local (SentenceTransformer) or ollama (default local)")
@@ -2955,6 +3274,9 @@ def main():
     # Setup logging after CLI arg parsing
     level = getattr(logging, args.log if hasattr(args, "log") else "INFO")
     logging.basicConfig(level=level, format="%(levelname)s: %(message)s")
+
+    if getattr(args, "no_log", False):
+        QUERY_LOG_DISABLED = True
 
     # v4.1: Update globals from CLI args (Section 7)
     EMB_BACKEND = args.emb_backend
@@ -2987,6 +3309,50 @@ def main():
 
     if args.cmd == "build":
         build(args.md_path, retries=getattr(args, "retries", 0))
+        return
+
+    if args.cmd == "ask":
+        _log_config_summary(
+            use_rerank=args.rerank,
+            pack_top=args.pack,
+            seed=args.seed,
+            threshold=args.threshold,
+            top_k=args.topk,
+            num_ctx=args.num_ctx,
+            num_predict=args.num_predict,
+            retries=getattr(args, "retries", 0)
+        )
+        chunks, vecs_n, bm, hnsw = ensure_index_ready(retries=getattr(args, "retries", 0))
+        ans, meta = answer_once(
+            args.question,
+            chunks,
+            vecs_n,
+            bm,
+            top_k=args.topk,
+            pack_top=args.pack,
+            threshold=args.threshold,
+            use_rerank=args.rerank,
+            debug=args.debug,
+            hnsw=hnsw,
+            seed=args.seed,
+            num_ctx=args.num_ctx,
+            num_predict=args.num_predict,
+            retries=getattr(args, "retries", 0)
+        )
+        if getattr(args, "json", False):
+            used_tokens = meta.get("used_tokens")
+            if used_tokens is None:
+                used_tokens = len(meta.get("selected", []))
+            output = answer_to_json(
+                ans,
+                meta.get("selected", []),
+                used_tokens,
+                args.topk,
+                args.pack
+            )
+            print(json.dumps(output, ensure_ascii=False, indent=2))
+        else:
+            print(ans)
         return
 
     if args.cmd == "chat":

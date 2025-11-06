@@ -85,7 +85,7 @@ class QueryCache:
         """
         self.maxsize = maxsize
         self.ttl_seconds = ttl_seconds
-        self.cache: dict = {}  # {question_hash: (answer, metadata, timestamp)}
+        self.cache: dict = {}  # {question_hash: (answer, metadata_with_timestamp, timestamp)}
         self.access_order: deque = deque()  # For LRU eviction
         self.hits = 0
         self.misses = 0
@@ -109,7 +109,13 @@ class QueryCache:
                 return None
 
             answer, metadata, timestamp = self.cache[key]
-            age = time.time() - timestamp
+            # Ensure metadata exposes cache timestamp for downstream logging
+            metadata_timestamp = metadata.get("timestamp")
+            if metadata_timestamp is None:
+                metadata_timestamp = timestamp
+                metadata["timestamp"] = metadata_timestamp
+
+            age = time.time() - metadata_timestamp
 
             # Check if expired
             if age > self.ttl_seconds:
@@ -143,7 +149,10 @@ class QueryCache:
                 logger.debug(f"[cache] EVICT question_hash={oldest[:8]} (LRU)")
 
             # Store entry with timestamp
-            self.cache[key] = (answer, metadata, time.time())
+            timestamp = time.time()
+            metadata = dict(metadata) if metadata is not None else {}
+            metadata["timestamp"] = timestamp
+            self.cache[key] = (answer, metadata, timestamp)
 
             # Update access order
             if key in self.access_order:
@@ -195,7 +204,11 @@ def log_query(query: str, answer: str, retrieved_chunks: list, latency_ms: float
               refused: bool = False, metadata: dict = None):
     """Log query with structured JSON format for monitoring and analytics."""
     import json
-    from .config import QUERY_LOG_FILE
+    from .config import (
+        LOG_QUERY_ANSWER_PLACEHOLDER,
+        LOG_QUERY_INCLUDE_ANSWER,
+        QUERY_LOG_FILE,
+    )
 
     # Extract chunk IDs and scores
     chunk_ids = [c["id"] if isinstance(c, dict) else c for c in retrieved_chunks]
@@ -205,7 +218,6 @@ def log_query(query: str, answer: str, retrieved_chunks: list, latency_ms: float
         "timestamp": time.time(),
         "timestamp_iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "query": query,
-        "answer": answer,
         "refused": refused,
         "latency_ms": latency_ms,
         "retrieved_chunks": len(chunk_ids),
@@ -213,6 +225,11 @@ def log_query(query: str, answer: str, retrieved_chunks: list, latency_ms: float
         "chunk_scores": chunk_scores,
         "metadata": metadata or {}
     }
+
+    if LOG_QUERY_INCLUDE_ANSWER:
+        log_entry["answer"] = answer
+    elif LOG_QUERY_ANSWER_PLACEHOLDER:
+        log_entry["answer"] = LOG_QUERY_ANSWER_PLACEHOLDER
 
     try:
         with open(QUERY_LOG_FILE, "a", encoding="utf-8") as f:

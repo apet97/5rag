@@ -64,39 +64,30 @@ python3 clockify_support_cli_final.py ask "How do I track time?" --debug
 # Add IDs to the dataset
 ```
 
-#### Method 3: Helper Script
+#### Method 3: Helper Script (Interactive or Automatic)
 
-Create `populate_ground_truth.py`:
+Use `scripts/populate_eval.py` to combine keyword heuristics with an
+interactive review loop:
 
-```python
-import json
+```bash
+# Populate chunk IDs with interactive confirmation
+python scripts/populate_eval.py \
+  --dataset eval_datasets/clockify_v1.jsonl \
+  --chunks chunks.jsonl
 
-# Load chunks
-with open('chunks.jsonl') as f:
-    chunks = [json.loads(line) for line in f if line.strip()]
-
-# Load evaluation dataset
-with open('eval_datasets/clockify_v1.jsonl') as f:
-    eval_data = [json.loads(line) for line in f if line.strip()]
-
-# For each query, manually identify relevant chunks
-for item in eval_data:
-    print(f"\nQuery: {item['query']}")
-    print(f"Notes: {item.get('notes', 'N/A')}")
-    print("\nSearch chunks.jsonl for relevant content...")
-    print("Enter chunk IDs (comma-separated): ", end='')
-
-    chunk_ids = input().strip()
-    if chunk_ids:
-        item['relevant_chunk_ids'] = [cid.strip() for cid in chunk_ids.split(',')]
-
-# Save updated dataset
-with open('eval_datasets/clockify_v1_populated.jsonl', 'w') as f:
-    for item in eval_data:
-        f.write(json.dumps(item) + '\n')
-
-print("\nSaved to eval_datasets/clockify_v1_populated.jsonl")
+# Automatically accept high-confidence matches (no prompts)
+python scripts/populate_eval.py --auto
 ```
+
+The script will:
+
+1. Load `chunks.jsonl` and score chunks using keywords from the query,
+   tags, and notes.
+2. Surface the highest scoring candidates for manual confirmation, or
+   automatically assign them when `--auto` is used.
+3. Write the populated dataset to
+   `eval_datasets/clockify_v1_populated.jsonl` (use `--output` to change
+   the path).
 
 ### Evaluation Metrics
 

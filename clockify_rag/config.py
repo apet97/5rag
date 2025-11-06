@@ -75,8 +75,19 @@ RERANK_READ_T = float(os.environ.get("RERANK_READ_TIMEOUT", "180"))
 REFUSAL_STR = "I don't know based on the MD."
 
 # ====== LOGGING CONFIG ======
+
+
+def _get_bool_env(var_name: str, default: str = "1") -> bool:
+    """Read a boolean environment variable."""
+
+    value = os.environ.get(var_name, default)
+    return value.lower() not in {"0", "false", "no", "off", ""}
+
+
 # Query logging configuration
 QUERY_LOG_FILE = os.environ.get("RAG_LOG_FILE", "rag_queries.jsonl")
+LOG_QUERY_INCLUDE_ANSWER = _get_bool_env("RAG_LOG_INCLUDE_ANSWER", "1")
+LOG_QUERY_ANSWER_PLACEHOLDER = os.environ.get("RAG_LOG_ANSWER_PLACEHOLDER", "[REDACTED]")
 
 # ====== FILE PATHS ======
 FILES = {
