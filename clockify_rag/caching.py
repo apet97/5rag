@@ -210,9 +210,31 @@ def log_query(query: str, answer: str, retrieved_chunks: list, latency_ms: float
         QUERY_LOG_FILE,
     )
 
-    # Extract chunk IDs and scores
-    chunk_ids = [c["id"] if isinstance(c, dict) else c for c in retrieved_chunks]
-    chunk_scores = [c.get("score", 0.0) if isinstance(c, dict) else 0.0 for c in retrieved_chunks]
+    normalized_chunks = []
+    for chunk in retrieved_chunks:
+        if isinstance(chunk, dict):
+            normalized = chunk.copy()
+            chunk_id = normalized.get("id") or normalized.get("chunk_id")
+            normalized["id"] = chunk_id
+            normalized["dense"] = float(normalized.get("dense", normalized.get("score", 0.0)))
+            normalized["bm25"] = float(normalized.get("bm25", 0.0))
+            normalized["hybrid"] = float(normalized.get("hybrid", normalized["dense"]))
+        else:
+            normalized = {
+                "id": chunk,
+                "dense": 0.0,
+                "bm25": 0.0,
+                "hybrid": 0.0,
+            }
+        normalized_chunks.append(normalized)
+
+    chunk_ids = [c.get("id") for c in normalized_chunks]
+    dense_scores = [c.get("dense", 0.0) for c in normalized_chunks]
+    bm25_scores = [c.get("bm25", 0.0) for c in normalized_chunks]
+    hybrid_scores = [c.get("hybrid", 0.0) for c in normalized_chunks]
+    primary_scores = hybrid_scores if hybrid_scores else []
+    avg_chunk_score = (sum(primary_scores) / len(primary_scores)) if primary_scores else 0.0
+    max_chunk_score = max(primary_scores) if primary_scores else 0.0
 
     log_entry = {
         "timestamp": time.time(),
@@ -220,10 +242,17 @@ def log_query(query: str, answer: str, retrieved_chunks: list, latency_ms: float
         "query": query,
         "refused": refused,
         "latency_ms": latency_ms,
-        "retrieved_chunks": len(chunk_ids),
+        "num_chunks_retrieved": len(chunk_ids),
         "chunk_ids": chunk_ids,
-        "chunk_scores": chunk_scores,
-        "metadata": metadata or {}
+        "chunk_scores": {
+            "dense": dense_scores,
+            "bm25": bm25_scores,
+            "hybrid": hybrid_scores,
+        },
+        "retrieved_chunks": normalized_chunks,
+        "avg_chunk_score": avg_chunk_score,
+        "max_chunk_score": max_chunk_score,
+        "metadata": metadata or {},
     }
 
     if LOG_QUERY_INCLUDE_ANSWER:
@@ -236,3 +265,4 @@ def log_query(query: str, answer: str, retrieved_chunks: list, latency_ms: float
             f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
     except Exception as e:
         logger.warning(f"Failed to log query: {e}")
+
