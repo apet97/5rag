@@ -1677,8 +1677,15 @@ def retrieve(question: str, chunks, vecs_n, bm, top_k=12, hnsw=None, retries=0) 
         candidate_idx = np.arange(len(chunks)).tolist()
 
     if not candidate_idx:
+        # Rank 20: Limit fallback to top candidates instead of full corpus
         dense_scores_full = vecs_n.dot(qv_n)
-        candidate_idx = np.arange(len(chunks)).tolist()
+        max_candidates = max(ANN_CANDIDATE_MIN, top_k * FAISS_CANDIDATE_MULTIPLIER)
+        if len(chunks) > max_candidates:
+            # Only keep top candidates, not entire corpus
+            top_indices = np.argsort(dense_scores_full)[::-1][:max_candidates]
+            candidate_idx = top_indices.tolist()
+        else:
+            candidate_idx = np.arange(len(chunks)).tolist()
         dense_scores = dense_scores_full
 
     candidate_idx_array = np.array(candidate_idx, dtype=np.int32)
@@ -2528,6 +2535,10 @@ def log_query(query, answer, retrieved_chunks, latency_ms, refused=False, metada
             normalized["dense"] = float(normalized.get("dense", normalized.get("score", 0.0)))
             normalized["bm25"] = float(normalized.get("bm25", 0.0))
             normalized["hybrid"] = float(normalized.get("hybrid", normalized["dense"]))
+            # Rank 12: Redact chunk text for security/privacy unless explicitly enabled
+            if not LOG_QUERY_INCLUDE_CHUNKS:
+                normalized.pop("chunk", None)  # Remove full chunk text
+                normalized.pop("text", None)   # Remove text field if present
         else:
             normalized = {
                 "id": chunk,
@@ -2734,6 +2745,19 @@ def generate_llm_answer(question, context_block, seed, num_ctx, num_predict, ret
     except Exception as e:
         # Unexpected error in parsing
         logger.warning(f"Error parsing LLM confidence: {e}")
+
+    # Rank 18: Improve fallback handling for non-JSON responses
+    # Check if raw response lacks citations and might be policy-violating
+    if answer == raw_response:  # JSON parsing failed, using raw response
+        # Check if answer contains citation markers
+        if packed_ids is not None and len(packed_ids) > 0:
+            has_citations = bool(extract_citations(answer))
+            if not has_citations and answer != REFUSAL_STR:
+                # No citations found in non-JSON response - potential policy violation
+                logger.warning(f"[llm_fallback] Raw response lacks citations, may violate policy")
+                # Could trigger refusal here for strict enforcement:
+                # answer = REFUSAL_STR
+                # But for now, just log the warning
 
     # Rank 9: Validate citations match packed chunks
     if packed_ids is not None:
