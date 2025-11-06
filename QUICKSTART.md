@@ -42,6 +42,7 @@ ollama pull qwen2.5:32b
 ## Building the Knowledge Base (One-Time)
 
 The production CLI handles chunking and embedding in a single build step. Run this after activating the virtual environment:
+### Step 1: Build the Knowledge Base
 
 ```bash
 source rag_env/bin/activate
@@ -55,6 +56,16 @@ The command validates existing artifacts, rebuilds them if needed, and creates t
 - `meta.jsonl` – metadata for each chunk
 - `bm25.json` – sparse retrieval index for keyword matching
 - `index.meta.json` – build metadata (used for automatic rebuild detection)
+The `build` command chunks the Markdown, generates dense embeddings, constructs the BM25 index, and writes out FAISS artifacts in one pass.
+
+**Expected output:**
+```
+BUILDING KNOWLEDGE BASE
+[1/4] Parsing and chunking...
+[2/4] Embedding with Ollama...
+[3/4] Building BM25 index...
+[4/4] Done.
+```
 
 The initial build can take several minutes depending on hardware; subsequent runs are faster thanks to incremental rebuild checks.
 
@@ -74,6 +85,18 @@ python3 clockify_support_cli_final.py chat
 The chat loop keeps the index in memory and lets you ask follow-up questions. Toggle diagnostics at any time with the `:debug` command.
 
 ### Run a Single Query
+python3 clockify_support_cli_final.py ask "How do I track time in Clockify?" --rerank --json
+```
+
+The `ask` command accepts all retrieval knobs (`--topk`, `--pack`, `--threshold`, `--rerank`) and `--json` for structured output, so it fits neatly into scripts or automation.
+
+**Example Response:**
+```
+You can track time in Clockify by [15, 23]:
+- Using the Timer button to start/stop tracking in real-time
+- Manually entering time entries with custom dates and durations
+- Integrating with third-party apps like Google Calendar, Slack, or Jira
+```
 
 Use the `ask` subcommand for one-off questions without entering the REPL:
 
@@ -98,6 +121,9 @@ python3 clockify_support_cli_final.py ask "What is time rounding in Clockify?"
 python3 clockify_support_cli_final.py ask "How do I set up projects?"
 python3 clockify_support_cli_final.py ask "Can I track time offline?"
 python3 clockify_support_cli_final.py ask "How do I export reports?"
+python3 clockify_support_cli_final.py ask "How do I set up projects?" --topk 16 --pack 8
+python3 clockify_support_cli_final.py ask "Can I track time offline?" --rerank
+python3 clockify_support_cli_final.py ask "How do I export reports?" --json
 python3 clockify_support_cli_final.py ask "What billing modes does Clockify support?"
 ```
 
@@ -117,6 +143,16 @@ After setup, your directory contains:
 ├── meta.jsonl                # Generated: chunk metadata
 ├── README_RAG.md             # Full documentation
 └── QUICKSTART.md             # This file
+├── clockify_support_cli_final.py   # Main CLI tool
+├── rag_env/                        # Virtual environment (activate with: source rag_env/bin/activate)
+├── knowledge_full.md               # Source documentation (6.9 MB)
+├── chunks.jsonl                    # Generated: documentation chunks
+├── vecs_n.npy                      # Generated: normalized embedding vectors
+├── meta.jsonl                      # Generated: chunk metadata
+├── bm25.json                       # Generated: sparse index
+├── faiss.index                     # Generated: ANN index (if enabled)
+├── README_RAG.md                   # Full documentation
+└── QUICKSTART.md                   # This file
 ```
 
 ---
@@ -135,6 +171,7 @@ ollama serve
 ```
 
 Check the `OLLAMA_URL` environment variable or override with `--ollama-url` when running the CLI.
+Check the URL in `clockify_support_cli_final.py` (line 11) matches your Ollama instance.
 
 ### Model Not Found
 
@@ -152,6 +189,7 @@ ollama pull qwen2.5:32b
 
 If you run out of memory during embedding:
 - Reduce `CHUNK_SIZE` in `clockify_support_cli_final.py` (defaults to 1600)
+- Reduce `CHUNK_SIZE` in `clockify_support_cli_final.py` (currently 1600)
 - Ensure you have at least 8GB RAM available
 - Close other applications
 
@@ -163,12 +201,12 @@ First-time queries may be slow as models load. Subsequent queries are faster.
 
 ## How It Works
 
-1. **Chunking**: Splits `knowledge_full.md` by `##` sections with 1600-char max per chunk
-2. **Embedding**: Converts each chunk to a semantic vector using `nomic-embed-text`
-3. **Retrieval**: Computes cosine similarity between your question and all chunks
-4. **Ranking**: Returns top 6 most relevant chunks
-5. **QA**: Passes retrieved chunks + question to `qwen2.5:32b` LLM for answer generation
-6. **Safety**: Rejects answers if fewer than 2 chunks are highly relevant (similarity ≥ 0.3)
+1. **Build**: `clockify_support_cli_final.py build` chunks `knowledge_full.md` (1600 char max with 200-char overlap)
+2. **Embed**: Dense vectors are generated via Ollama (`nomic-embed-text`) or the local backend
+3. **Index**: BM25 and optional FAISS indices are stored for fast retrieval
+4. **Retrieve**: Each `ask`/`chat` query scores BM25 + dense similarities with hybrid weighting
+5. **Rerank (optional)**: `--rerank` performs an LLM rerank pass for higher precision
+6. **Answer**: Top snippets are packed and sent to `qwen2.5:32b`; the CLI refuses when coverage is insufficient
 
 ---
 
@@ -197,6 +235,13 @@ python3 clockify_support_cli_final.py ask "Your question here"
 
 # Interactive mode
 python3 clockify_support_cli_final.py chat
+python3 clockify_support_cli_final.py build knowledge_full.md   # Build retrieval artifacts
+
+# Ask questions (repeatable)
+python3 clockify_support_cli_final.py ask "Your question here" --rerank --json
+
+# Interactive mode
+python3 clockify_support_cli_final.py chat --debug
 
 # Help
 python3 clockify_support_cli_final.py --help
