@@ -2299,9 +2299,9 @@ def apply_mmr_diversification(selected, scores, vecs_n, pack_top):
             # Compute MMR scores for remaining candidates
             mmr_scores = MMR_LAMBDA * relevance_scores.copy()
 
-            if len(mmr_selected) > 1:  # More than just the first item
-                # Get vectors of already-selected items (excluding the first one we added manually)
-                selected_vecs = vecs_n[mmr_selected[1:]]  # [num_selected-1, emb_dim]
+            if len(mmr_selected) > 0:  # Only apply diversity when we have prior selections
+                # Get vectors of all already-selected items
+                selected_vecs = vecs_n[mmr_selected]  # [num_selected, emb_dim]
 
                 # Compute similarity matrix: [num_candidates, num_selected]
                 similarity_matrix = cand_vecs @ selected_vecs.T
