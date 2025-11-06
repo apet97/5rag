@@ -38,6 +38,7 @@ from clockify_support_cli_final import (
     answer_once,
     load_index,
     EMB_BACKEND,
+    RETRIEVE_PROFILE_LAST,
 )
 
 
@@ -49,6 +50,7 @@ class BenchmarkResult:
         self.latencies = []  # milliseconds
         self.memory_peak = 0  # bytes
         self.memory_current = 0  # bytes
+        self.metadata = {}
 
     def add_latency(self, latency_ms: float):
         self.latencies.append(latency_ms)
@@ -57,12 +59,15 @@ class BenchmarkResult:
         self.memory_peak = peak_bytes
         self.memory_current = current_bytes
 
+    def set_metadata(self, **kwargs):
+        self.metadata.update(kwargs)
+
     def summary(self) -> dict:
         """Get summary statistics."""
         if not self.latencies:
             return {"name": self.name, "error": "No measurements"}
 
-        return {
+        summary = {
             "name": self.name,
             "latency_ms": {
                 "mean": round(mean(self.latencies), 2),
@@ -81,6 +86,11 @@ class BenchmarkResult:
             },
             "iterations": len(self.latencies),
         }
+
+        if self.metadata:
+            summary["metadata"] = self.metadata
+
+        return summary
 
 
 def benchmark(func: Callable, iterations: int = 10, warmup: int = 2) -> BenchmarkResult:
@@ -115,6 +125,37 @@ def benchmark(func: Callable, iterations: int = 10, warmup: int = 2) -> Benchmar
     result.set_memory(peak, current)
 
     return result
+
+
+def aggregate_retrieval_profiles(profiles: list[dict]) -> dict:
+    """Aggregate retrieval profiling samples into summary stats."""
+
+    if not profiles:
+        return {}
+
+    dot_mean = mean(p.get("dense_dot_time_ms", 0.0) for p in profiles)
+    computed_mean = mean(p.get("dense_computed", 0) for p in profiles)
+    saved_mean = mean(p.get("dense_saved", 0) for p in profiles)
+    candidates_mean = mean(p.get("candidates", 0) for p in profiles)
+    total_saved = sum(p.get("dense_saved", 0) for p in profiles)
+    total = sum(p.get("dense_total", 0) for p in profiles)
+    saved_ratio = round(total_saved / total, 3) if total else 0.0
+
+    if any(p.get("used_faiss") for p in profiles):
+        ann_mode = "faiss"
+    elif any(p.get("used_hnsw") for p in profiles):
+        ann_mode = "hnsw"
+    else:
+        ann_mode = "linear"
+
+    return {
+        "ann_mode": ann_mode,
+        "dense_dot_ms_mean": round(dot_mean, 3),
+        "dense_computed_mean": round(computed_mean, 2),
+        "dense_saved_mean": round(saved_mean, 2),
+        "dense_saved_ratio": saved_ratio,
+        "candidates_mean": round(candidates_mean, 2),
+    }
 
 
 # ====== EMBEDDING BENCHMARKS ======
@@ -158,26 +199,36 @@ def benchmark_embedding_large_batch(chunks, iterations=3):
 def benchmark_retrieval_bm25(chunks, vecs_n, bm, iterations=20):
     """Benchmark BM25-only retrieval."""
     question = "How do I track time in Clockify?"
+    profiles = []
 
     def run():
         retrieve(question, chunks, vecs_n, bm, top_k=12, hnsw=None)
+        if RETRIEVE_PROFILE_LAST:
+            profiles.append(dict(RETRIEVE_PROFILE_LAST))
 
     result = benchmark(run, iterations=iterations, warmup=3)
     result.name = "retrieve_hybrid"
+    if profiles:
+        result.set_metadata(**aggregate_retrieval_profiles(profiles))
     return result
 
 
 def benchmark_retrieval_with_mmr(chunks, vecs_n, bm, iterations=20):
     """Benchmark retrieval + MMR diversification."""
     question = "How do I track time in Clockify?"
+    profiles = []
 
     def run():
         selected, scores = retrieve(question, chunks, vecs_n, bm, top_k=12, hnsw=None)
         # Simulate MMR (already included in answer_once, but measure separately)
         _ = selected[:6]  # Pack top 6
+        if RETRIEVE_PROFILE_LAST:
+            profiles.append(dict(RETRIEVE_PROFILE_LAST))
 
     result = benchmark(run, iterations=iterations, warmup=3)
     result.name = "retrieve_with_mmr"
+    if profiles:
+        result.set_metadata(**aggregate_retrieval_profiles(profiles))
     return result
 
 
@@ -314,6 +365,11 @@ def main():
         print(f"  Latency:    {s['latency_ms']['mean']:.2f}ms ± {s['latency_ms']['stdev']:.2f}ms")
         print(f"  Throughput: {s['throughput']['ops_per_sec']:.2f} ops/sec")
         print(f"  Memory:     {s['memory_mb']['peak']:.2f} MB peak")
+        metadata = s.get("metadata")
+        if metadata:
+            print("  Profiling:")
+            for key, value in metadata.items():
+                print(f"    {key}: {value}")
 
     # Save to JSON
     output_data = {

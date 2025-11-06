@@ -292,6 +292,8 @@ def embed_local_batch(texts: list, normalize: bool = True) -> np.ndarray:
 # ====== FAISS ANN INDEX (v4.1 - Section 3) ======
 _FAISS_INDEX = None
 _FAISS_LOCK = threading.Lock()
+# Stores profiling data from the most recent `retrieve` invocation.
+RETRIEVE_PROFILE_LAST = {}
 
 def _try_load_faiss():
     """Try importing FAISS; returns None if not available."""
@@ -1422,8 +1424,9 @@ def retrieve(question: str, chunks, vecs_n, bm, top_k=12, hnsw=None, retries=0) 
     Returns:
         Tuple of (filtered_indices, scores_dict) where filtered_indices is list of int
         and scores_dict contains 'dense', 'bm25', and 'hybrid' numpy arrays.
+        Profiling metrics for the last call are stored in RETRIEVE_PROFILE_LAST.
     """
-    global _FAISS_INDEX
+    global _FAISS_INDEX, RETRIEVE_PROFILE_LAST
 
     # Expand query for BM25 keyword matching (Rank 13)
     expanded_question = expand_query(question)
@@ -1441,23 +1444,47 @@ def retrieve(question: str, chunks, vecs_n, bm, top_k=12, hnsw=None, retries=0) 
             logger.info("info: ann=fallback reason=missing-index")
 
     # Use FAISS if available for fast candidate generation
+    n_chunks = len(chunks)
+    dot_elapsed = 0.0
+    dense_computed = 0
+
     if _FAISS_INDEX:
-        D, I = _FAISS_INDEX.search(qv_n.reshape(1, -1).astype("float32"), max(ANN_CANDIDATE_MIN, top_k * FAISS_CANDIDATE_MULTIPLIER))
-        candidate_idx = [int(i) for i in I[0] if i >= 0]
-        dense_scores = np.array([float(d) for d in D[0][:len(candidate_idx)]])
+        D, I = _FAISS_INDEX.search(
+            qv_n.reshape(1, -1).astype("float32"),
+            max(ANN_CANDIDATE_MIN, top_k * FAISS_CANDIDATE_MULTIPLIER),
+        )
+        candidate_idx = [int(i) for i in I[0] if 0 <= i < n_chunks]
+        dense_from_ann = np.array([float(d) for d in D[0][: len(candidate_idx)]], dtype=np.float32)
+
+        dense_scores_full = np.empty(n_chunks, dtype=np.float32)
+        candidate_idx_arr = np.array(candidate_idx, dtype=np.int32) if candidate_idx else np.empty(0, dtype=np.int32)
+        if candidate_idx:
+            dense_scores_full[candidate_idx_arr] = dense_from_ann
+
+        remaining_mask = np.ones(n_chunks, dtype=bool)
+        if candidate_idx:
+            remaining_mask[candidate_idx_arr] = False
+        remaining_idx = np.nonzero(remaining_mask)[0]
+        if remaining_idx.size:
+            dot_start = time.perf_counter()
+            dense_scores_full[remaining_idx] = vecs_n[remaining_idx].dot(qv_n)
+            dot_elapsed = time.perf_counter() - dot_start
+            dense_computed = int(remaining_idx.size)
     # Fallback to HNSW if available
     elif hnsw:
         _, cand = hnsw.knn_query(qv_n, k=max(ANN_CANDIDATE_MIN, top_k * FAISS_CANDIDATE_MULTIPLIER))
         candidate_idx = cand[0].tolist()
+        dot_start = time.perf_counter()
         dense_scores_full = vecs_n.dot(qv_n)
-        dense_scores = dense_scores_full[candidate_idx]
+        dot_elapsed = time.perf_counter() - dot_start
+        dense_computed = n_chunks
     else:
         # Task H: dense scoring uses np.dot with float32
-        dense_scores = vecs_n.dot(qv_n)
-        candidate_idx = np.arange(len(chunks))
-
-    # Compute full scores once for reuse (performance optimization)
-    dense_scores_full = vecs_n.dot(qv_n)
+        dot_start = time.perf_counter()
+        dense_scores_full = vecs_n.dot(qv_n)
+        dot_elapsed = time.perf_counter() - dot_start
+        dense_computed = n_chunks
+        candidate_idx = np.arange(n_chunks)
     # Use expanded query for BM25 (keyword matching benefits from synonyms)
     # Rank 24: Pass top_k for early termination on large corpora
     bm_scores_full = bm25_scores(expanded_question, bm, top_k=top_k * 3)
@@ -1486,6 +1513,30 @@ def retrieve(question: str, chunks, vecs_n, bm, top_k=12, hnsw=None, retries=0) 
 
     # Reuse cached normalized scores for full hybrid (already computed above)
     hybrid_full = ALPHA_HYBRID * zs_bm_full + (1 - ALPHA_HYBRID) * zs_dense_full
+
+    dense_total = n_chunks
+    used_hnsw = bool(hnsw) and _FAISS_INDEX is None
+    dense_computed_total = dense_computed or (dense_total if (used_hnsw or not _FAISS_INDEX) else 0)
+    dense_reused = dense_total - dense_computed_total
+    RETRIEVE_PROFILE_LAST = {
+        "used_faiss": bool(_FAISS_INDEX),
+        "used_hnsw": used_hnsw,
+        "candidates": int(len(candidate_idx)),
+        "dense_total": int(dense_total),
+        "dense_reused": int(dense_reused),
+        "dense_computed": int(dense_computed_total),
+        "dense_saved": int(dense_total - dense_computed_total),
+        "dense_dot_time_ms": round(dot_elapsed * 1000, 3),
+    }
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "profile: retrieval ann=%s reused=%d computed=%d total=%d dot_ms=%.3f",
+            "faiss" if _FAISS_INDEX else ("hnsw" if used_hnsw else "linear"),
+            RETRIEVE_PROFILE_LAST["dense_reused"],
+            RETRIEVE_PROFILE_LAST["dense_computed"],
+            dense_total,
+            RETRIEVE_PROFILE_LAST["dense_dot_time_ms"],
+        )
 
     return filtered, {
         "dense": dense_scores_full,
