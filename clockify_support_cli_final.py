@@ -1790,6 +1790,122 @@ def log_query(query, answer, retrieved_chunks, latency_ms, refused=False, metada
     except Exception as e:
         logger.warning(f"Failed to write query log: {e}")
 
+# ====== ANSWER PIPELINE HELPERS ======
+def apply_mmr_diversification(selected, scores, vecs_n, pack_top):
+    """Apply Maximal Marginal Relevance diversification to selected chunks.
+
+    Args:
+        selected: List of selected chunk indices
+        scores: Dict with "dense" scores
+        vecs_n: Normalized embedding vectors
+        pack_top: Maximum number of chunks to select
+
+    Returns:
+        List of diversified chunk indices
+    """
+    mmr_selected = []
+    cand = list(selected)
+
+    # Always include the top dense score first for better recall
+    if cand:
+        top_dense_idx = max(cand, key=lambda j: scores["dense"][j])
+        mmr_selected.append(top_dense_idx)
+        cand.remove(top_dense_idx)
+
+    # Then diversify the rest using vectorized MMR
+    if cand and len(mmr_selected) < pack_top:
+        # Convert to numpy arrays for vectorized operations
+        cand_array = np.array(cand, dtype=np.int32)
+        relevance_scores = np.array([scores["dense"][j] for j in cand], dtype=np.float32)
+
+        # Get embedding vectors for candidates
+        cand_vecs = vecs_n[cand_array]  # [num_candidates, emb_dim]
+
+        # Iteratively select using MMR
+        remaining_mask = np.ones(len(cand_array), dtype=bool)
+
+        while np.any(remaining_mask) and len(mmr_selected) < pack_top:
+            # Compute MMR scores for remaining candidates
+            mmr_scores = MMR_LAMBDA * relevance_scores.copy()
+
+            if len(mmr_selected) > 1:  # More than just the first item
+                # Get vectors of already-selected items (excluding the first one we added manually)
+                selected_vecs = vecs_n[mmr_selected[1:]]  # [num_selected-1, emb_dim]
+
+                # Compute similarity matrix: [num_candidates, num_selected]
+                similarity_matrix = cand_vecs @ selected_vecs.T
+
+                # Get max similarity for each candidate
+                max_similarities = similarity_matrix.max(axis=1)
+
+                # Update MMR scores with diversity penalty
+                mmr_scores -= (1 - MMR_LAMBDA) * max_similarities
+
+            # Mask out already-selected candidates
+            mmr_scores[~remaining_mask] = -np.inf
+
+            # Select candidate with highest MMR score
+            best_idx = mmr_scores.argmax()
+            selected_chunk_idx = cand_array[best_idx]
+
+            mmr_selected.append(int(selected_chunk_idx))
+            remaining_mask[best_idx] = False
+
+    return mmr_selected
+
+
+def apply_reranking(question, chunks, mmr_selected, scores, use_rerank, seed, num_ctx, num_predict, retries):
+    """Apply optional LLM reranking to MMR-selected chunks.
+
+    Args:
+        question: User question
+        chunks: All chunks
+        mmr_selected: List of MMR-selected chunk indices
+        scores: Dict with relevance scores
+        use_rerank: Whether to apply reranking
+        seed, num_ctx, num_predict, retries: LLM parameters
+
+    Returns:
+        Tuple of (reranked_chunks, rerank_scores, rerank_applied, rerank_reason, timing)
+    """
+    rerank_scores = {}
+    rerank_applied = False
+    rerank_reason = "disabled"
+    timing = 0.0
+
+    if use_rerank:
+        logger.debug(json.dumps({"event": "rerank_start", "candidates": len(mmr_selected)}))
+        t0 = time.time()
+        mmr_selected, rerank_scores, rerank_applied, rerank_reason = rerank_with_llm(
+            question, chunks, mmr_selected, scores, seed=seed, num_ctx=num_ctx, num_predict=num_predict, retries=retries
+        )
+        timing = time.time() - t0
+        logger.debug(json.dumps({"event": "rerank_done", "selected": len(mmr_selected), "scored": len(rerank_scores)}))
+
+        # Add greppable rerank fallback log
+        if not rerank_applied:
+            logger.debug("info: rerank=fallback reason=%s", rerank_reason)
+
+    return mmr_selected, rerank_scores, rerank_applied, rerank_reason, timing
+
+
+def generate_llm_answer(question, context_block, seed, num_ctx, num_predict, retries):
+    """Generate answer from LLM given question and context.
+
+    Args:
+        question: User question
+        context_block: Packed context snippets
+        seed, num_ctx, num_predict, retries: LLM parameters
+
+    Returns:
+        Tuple of (answer_text, timing)
+    """
+    t0 = time.time()
+    answer = ask_llm(question, context_block, seed=seed, num_ctx=num_ctx, num_predict=num_predict, retries=retries).strip()
+    timing = time.time() - t0
+    return answer, timing
+
+
 # ====== ANSWER (STATELESS) ======
 def answer_once(
     question: str,
@@ -1831,72 +1947,14 @@ def answer_once(
         selected, scores = retrieve(question, chunks, vecs_n, bm, top_k=top_k, hnsw=hnsw, retries=retries)
         timings["retrieve"] = time.time() - t0
 
-        # Step 2: MMR diversification on deduped candidates (VECTORIZED)
-        mmr_selected = []
-        cand = list(selected)
+        # Step 2: MMR diversification
+        mmr_selected = apply_mmr_diversification(selected, scores, vecs_n, pack_top)
 
-        # Always include the top dense score first for better recall
-        if cand:
-            top_dense_idx = max(cand, key=lambda j: scores["dense"][j])
-            mmr_selected.append(top_dense_idx)
-            cand.remove(top_dense_idx)
-
-        # Then diversify the rest using vectorized MMR
-        if cand and len(mmr_selected) < pack_top:
-            # Convert to numpy arrays for vectorized operations
-            cand_array = np.array(cand, dtype=np.int32)
-            relevance_scores = np.array([scores["dense"][j] for j in cand], dtype=np.float32)
-
-            # Get embedding vectors for candidates
-            cand_vecs = vecs_n[cand_array]  # [num_candidates, emb_dim]
-
-            # Iteratively select using MMR
-            remaining_mask = np.ones(len(cand_array), dtype=bool)
-
-            while np.any(remaining_mask) and len(mmr_selected) < pack_top:
-                # Compute MMR scores for remaining candidates
-                mmr_scores = MMR_LAMBDA * relevance_scores.copy()
-
-                if len(mmr_selected) > 1:  # More than just the first item
-                    # Get vectors of already-selected items (excluding the first one we added manually)
-                    selected_vecs = vecs_n[mmr_selected[1:]]  # [num_selected-1, emb_dim]
-
-                    # Compute similarity matrix: [num_candidates, num_selected]
-                    # Each row is similarities between one candidate and all selected
-                    similarity_matrix = cand_vecs @ selected_vecs.T
-
-                    # Get max similarity for each candidate
-                    max_similarities = similarity_matrix.max(axis=1)
-
-                    # Update MMR scores with diversity penalty
-                    mmr_scores -= (1 - MMR_LAMBDA) * max_similarities
-
-                # Mask out already-selected candidates
-                mmr_scores[~remaining_mask] = -np.inf
-
-                # Select candidate with highest MMR score
-                best_idx = mmr_scores.argmax()
-                selected_chunk_idx = cand_array[best_idx]
-
-                mmr_selected.append(int(selected_chunk_idx))
-                remaining_mask[best_idx] = False
-
-        # Step 3: Optional LLM reranking on MMR order (Task B)
-        rerank_scores = {}
-        rerank_applied = False
-        rerank_reason = "disabled"
-        if use_rerank:
-            logger.debug(json.dumps({"event": "rerank_start", "candidates": len(mmr_selected)}))
-            t0 = time.time()
-            mmr_selected, rerank_scores, rerank_applied, rerank_reason = rerank_with_llm(
-                question, chunks, mmr_selected, scores, seed=seed, num_ctx=num_ctx, num_predict=num_predict, retries=retries
-            )
-            timings["rerank"] = time.time() - t0
-            logger.debug(json.dumps({"event": "rerank_done", "selected": len(mmr_selected), "scored": len(rerank_scores)}))
-
-            # Patch 6: Add greppable rerank fallback log
-            if not rerank_applied:
-                logger.debug("info: rerank=fallback reason=%s", rerank_reason)
+        # Step 3: Optional LLM reranking
+        mmr_selected, rerank_scores, rerank_applied, rerank_reason, rerank_timing = apply_reranking(
+            question, chunks, mmr_selected, scores, use_rerank, seed, num_ctx, num_predict, retries
+        )
+        timings["rerank"] = rerank_timing
 
         # Step 4: Coverage check
         coverage_pass = coverage_ok(mmr_selected, scores["dense"], threshold)
@@ -1924,10 +1982,9 @@ def answer_once(
         # Apply policy preamble for sensitive queries
         block = inject_policy_preamble(block, question)
 
-        # Step 6: Call LLM
-        t0 = time.time()
-        ans = ask_llm(question, block, seed=seed, num_ctx=num_ctx, num_predict=num_predict, retries=retries).strip()
-        timings["ask_llm"] = time.time() - t0
+        # Step 6: Generate answer from LLM
+        ans, llm_timing = generate_llm_answer(question, block, seed, num_ctx, num_predict, retries)
+        timings["ask_llm"] = llm_timing
         timings["total"] = time.time() - turn_start
 
         # Step 7: Optional debug output with all metrics (Task B, F)
