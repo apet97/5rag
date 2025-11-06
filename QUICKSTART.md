@@ -41,6 +41,7 @@ ollama pull qwen2.5:32b
 
 ## Building the Knowledge Base (One-Time)
 
+The production CLI handles chunking and embedding in a single build step. Run this after activating the virtual environment:
 ### Step 1: Build the Knowledge Base
 
 ```bash
@@ -48,32 +49,42 @@ source rag_env/bin/activate
 python3 clockify_support_cli_final.py build knowledge_full.md
 ```
 
+The command validates existing artifacts, rebuilds them if needed, and creates the following files:
+
+- `chunks.jsonl` – structured document chunks
+- `vecs_n.npy` – normalized dense embeddings (float32)
+- `meta.jsonl` – metadata for each chunk
+- `bm25.json` – sparse retrieval index for keyword matching
+- `index.meta.json` – build metadata (used for automatic rebuild detection)
 The `build` command chunks the Markdown, generates dense embeddings, constructs the BM25 index, and writes out FAISS artifacts in one pass.
 
 **Expected output:**
 ```
-======================================================================
 BUILDING KNOWLEDGE BASE
-======================================================================
 [1/4] Parsing and chunking...
 [2/4] Embedding with Ollama...
 [3/4] Building BM25 index...
 [4/4] Done.
-======================================================================
 ```
 
-This may take a few minutes depending on the size of your knowledge base and hardware.
+The initial build can take several minutes depending on hardware; subsequent runs are faster thanks to incremental rebuild checks.
 
 ---
 
 ## Using the Tool (Repeatable)
 
-### Ask Questions
+### Start the Interactive Chat
 
-Once chunks and embeddings are generated, query the knowledge base:
+After the build completes, launch the REPL interface:
 
 ```bash
 source rag_env/bin/activate
+python3 clockify_support_cli_final.py chat
+```
+
+The chat loop keeps the index in memory and lets you ask follow-up questions. Toggle diagnostics at any time with the `:debug` command.
+
+### Run a Single Query
 python3 clockify_support_cli_final.py ask "How do I track time in Clockify?" --rerank --json
 ```
 
@@ -87,9 +98,16 @@ You can track time in Clockify by [15, 23]:
 - Integrating with third-party apps like Google Calendar, Slack, or Jira
 ```
 
-Or if information isn't available:
+Use the `ask` subcommand for one-off questions without entering the REPL:
+
+```bash
+python3 clockify_support_cli_final.py ask "How do I track time in Clockify?"
 ```
-I don't know based on the MD.
+
+Add `--json` for structured output that includes the selected chunk IDs and token usage:
+
+```bash
+python3 clockify_support_cli_final.py ask "How do I track time in Clockify?" --json
 ```
 
 ---
@@ -100,6 +118,9 @@ Try these questions to test the system:
 
 ```bash
 python3 clockify_support_cli_final.py ask "What is time rounding in Clockify?"
+python3 clockify_support_cli_final.py ask "How do I set up projects?"
+python3 clockify_support_cli_final.py ask "Can I track time offline?"
+python3 clockify_support_cli_final.py ask "How do I export reports?"
 python3 clockify_support_cli_final.py ask "How do I set up projects?" --topk 16 --pack 8
 python3 clockify_support_cli_final.py ask "Can I track time offline?" --rerank
 python3 clockify_support_cli_final.py ask "How do I export reports?" --json
@@ -114,6 +135,14 @@ After setup, your directory contains:
 
 ```
 /Users/15x/Downloads/KBDOC/
+├── clockify_support_cli_final.py  # Main CLI tool (build/chat/ask)
+├── rag_env/                  # Virtual environment (activate with: source rag_env/bin/activate)
+├── knowledge_full.md         # Source documentation (6.9 MB)
+├── chunks.jsonl              # Generated: documentation chunks
+├── vecs_n.npy                # Generated: normalized embedding vectors
+├── meta.jsonl                # Generated: chunk metadata
+├── README_RAG.md             # Full documentation
+└── QUICKSTART.md             # This file
 ├── clockify_support_cli_final.py   # Main CLI tool
 ├── rag_env/                        # Virtual environment (activate with: source rag_env/bin/activate)
 ├── knowledge_full.md               # Source documentation (6.9 MB)
@@ -141,6 +170,7 @@ Embedding request failed for chunk 0: Connection refused
 ollama serve
 ```
 
+Check the `OLLAMA_URL` environment variable or override with `--ollama-url` when running the CLI.
 Check the URL in `clockify_support_cli_final.py` (line 11) matches your Ollama instance.
 
 ### Model Not Found
@@ -158,6 +188,7 @@ ollama pull qwen2.5:32b
 ### Memory Issues
 
 If you run out of memory during embedding:
+- Reduce `CHUNK_SIZE` in `clockify_support_cli_final.py` (defaults to 1600)
 - Reduce `CHUNK_SIZE` in `clockify_support_cli_final.py` (currently 1600)
 - Ensure you have at least 8GB RAM available
 - Close other applications
@@ -197,6 +228,13 @@ See `README_RAG.md` for:
 source rag_env/bin/activate
 
 # Run setup (one-time)
+python3 clockify_support_cli_final.py build knowledge_full.md
+
+# Ask questions (repeatable)
+python3 clockify_support_cli_final.py ask "Your question here"
+
+# Interactive mode
+python3 clockify_support_cli_final.py chat
 python3 clockify_support_cli_final.py build knowledge_full.md   # Build retrieval artifacts
 
 # Ask questions (repeatable)

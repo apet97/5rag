@@ -3173,6 +3173,11 @@ def run_selftest():
 
     return all(status == "PASS" for _, status in results)
 
+# ====== ARTIFACT MANAGEMENT ======
+def ensure_index_ready(retries=0):
+    """Ensure retrieval artifacts exist and load them."""
+    artifacts = [FILES["chunks"], FILES["emb"], FILES["meta"], FILES["bm25"], FILES["index_meta"]]
+    artifacts_ok = all(os.path.exists(fname) for fname in artifacts)
 # ====== REPL ======
 def ensure_index_ready(retries=0):
     """Ensure retrieval artifacts are present and return loaded index components."""
@@ -3189,6 +3194,7 @@ def ensure_index_ready(retries=0):
             build("knowledge_full.md", retries=retries)
         else:
             logger.error("knowledge_full.md not found")
+            sys.exit(1)
             raise SystemExit(1)
 
     result = load_index()
@@ -3199,6 +3205,15 @@ def ensure_index_ready(retries=0):
             result = load_index()
         else:
             logger.error("knowledge_full.md not found")
+            sys.exit(1)
+
+    if result is None:
+        logger.error("Failed to load artifacts after rebuild")
+        sys.exit(1)
+
+    return result
+
+# ====== REPL ======
             raise SystemExit(1)
 
     if result is None:
@@ -3361,6 +3376,7 @@ def main():
     c.add_argument("--json", action="store_true", help="Output answer as JSON with metrics (v4.1)")
 
     a = subparsers.add_parser("ask", help="Answer a single question and exit")
+    a.add_argument("question", help="Question text to send to the assistant")
     a.add_argument("question", help="Question to answer")
     a.add_argument("--debug", action="store_true", help="Print retrieval diagnostics")
     a.add_argument("--rerank", action="store_true", help="Enable LLM-based reranking")
@@ -3543,6 +3559,55 @@ def main():
             retries=getattr(args, "retries", 0),
             use_json=getattr(args, "json", False)  # v4.1: JSON output flag
         )
+        return
+
+    if args.cmd == "ask":
+        chunks, vecs_n, bm, hnsw = ensure_index_ready(retries=getattr(args, "retries", 0))
+
+        _log_config_summary(
+            use_rerank=args.rerank,
+            pack_top=args.pack,
+            seed=args.seed,
+            threshold=args.threshold,
+            top_k=args.topk,
+            num_ctx=args.num_ctx,
+            num_predict=args.num_predict,
+            retries=getattr(args, "retries", 0)
+        )
+
+        warmup_on_startup()
+
+        ans, meta = answer_once(
+            args.question,
+            chunks,
+            vecs_n,
+            bm,
+            top_k=args.topk,
+            pack_top=args.pack,
+            threshold=args.threshold,
+            use_rerank=args.rerank,
+            debug=args.debug,
+            hnsw=hnsw,
+            seed=args.seed,
+            num_ctx=args.num_ctx,
+            num_predict=args.num_predict,
+            retries=getattr(args, "retries", 0)
+        )
+
+        if getattr(args, "json", False):
+            used_tokens = meta.get("used_tokens")
+            if used_tokens is None:
+                used_tokens = len(meta.get("selected", []))
+            output = answer_to_json(
+                ans,
+                meta.get("selected", []),
+                used_tokens,
+                args.topk,
+                args.pack
+            )
+            print(json.dumps(output, ensure_ascii=False, indent=2))
+        else:
+            print(ans)
         return
 
 if __name__ == "__main__":
