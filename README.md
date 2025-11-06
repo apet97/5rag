@@ -54,11 +54,11 @@ python3 clockify_support_cli_final.py chat
 # With debug mode
 python3 clockify_support_cli_final.py chat --debug
 
-# Single query
-python3 clockify_support_cli_final.py ask "How do I track time in Clockify?"
+# Single query (supports --rerank/--json/--topk/--pack)
+python3 clockify_support_cli_final.py ask "How do I track time in Clockify?" --rerank --json
 
 # Run self-tests
-python3 clockify_support_cli_final.py selftest
+python3 clockify_support_cli_final.py --selftest
 ```
 
 ## What's New in v4.1.2
@@ -112,12 +112,12 @@ python3 clockify_support_cli_final.py chat [--debug] [--rerank]
 
 **Ask Command** (single query):
 ```bash
-python3 clockify_support_cli_final.py ask "Your question" [--json]
+python3 clockify_support_cli_final.py ask "Your question" [--rerank] [--topk 12] [--pack 6] [--threshold 0.30] [--json]
 ```
 
 **Self-Test Command**:
 ```bash
-python3 clockify_support_cli_final.py selftest
+python3 clockify_support_cli_final.py --selftest
 ```
 
 ## Files
@@ -161,6 +161,26 @@ python3 clockify_support_cli_final.py selftest
 - All POST calls use explicit (connect, read) timeouts
 - Policy guardrails for sensitive queries
 
+## DeepSeek Ollama Shim – Production Guidance
+
+The optional `deepseek_ollama_shim.py` exposes a minimal HTTP interface that is aimed at local development. Before enabling it in shared or production environments, review and apply the following controls:
+
+### Risks
+- ⚠️ **Unauthenticated access by default** – anyone who can reach the port can call the DeepSeek API with your key.
+- ⚠️ **Plain HTTP transport** – requests are unencrypted unless you add TLS or terminate it behind a reverse proxy.
+- ⚠️ **Limited rate limiting/auditing** – no built-in throttling or logging.
+
+### Hardening Checklist
+- Set `SHIM_AUTH_TOKEN` to require a `Bearer` token (or `X-Auth-Token`) header on every request.
+- Optionally configure `SHIM_ALLOW_IPS` with a comma-separated allowlist (e.g. `127.0.0.1,10.0.0.5`) to limit which clients can connect.
+- Run the shim on a loopback or firewalled interface (`SHIM_HOST=127.0.0.1` by default) and expose it externally only via a gateway that enforces your organization’s security policies.
+
+### Transport Security
+- Provide `SHIM_TLS_CERT` and `SHIM_TLS_KEY` to enable built-in TLS termination. The server will refuse connections if the presented certificate is invalid.
+- Alternatively, keep TLS and authentication in a hardened reverse proxy (e.g. Nginx, Caddy, Envoy) and run the shim behind it for additional observability and access controls.
+
+Document and monitor any deployments that expose the shim outside of a trusted network segment.
+
 ### Reliability 🛡️
 - urllib3 v1 and v2 compatible retry adapter
 - Manual bounded POST retry (max 1 retry, 0.5s backoff)
@@ -178,6 +198,10 @@ python3 clockify_support_cli_final.py selftest
 - One-line turn logging with latency metrics
 - Rerank fallback logging
 - Self-check unit tests
+
+### Privacy Controls 🔐
+- `RAG_LOG_INCLUDE_ANSWER` (default `1`): set to `0`, `false`, or `no` to redact raw answers from `rag_queries.jsonl` logs.
+- `RAG_LOG_ANSWER_PLACEHOLDER` (optional): customize the placeholder text written when answers are redacted. Leave unset to use `[REDACTED]`; set to an empty string to omit the field entirely.
 
 ## Configuration Examples
 
@@ -229,7 +253,7 @@ open htmlcov/index.html
 
 ### Run Self-Tests
 ```bash
-python3 clockify_support_cli.py chat --selftest
+python3 clockify_support_cli_final.py --selftest
 # Expected: [selftest] 4/4 tests passed
 ```
 
@@ -317,7 +341,7 @@ label generation.
 
 ### Build & Test
 - [ ] Build knowledge base: `python3 clockify_support_cli_final.py build knowledge_full.md`
-- [ ] Run self-tests: `python3 clockify_support_cli_final.py selftest`
+- [ ] Run self-tests: `python3 clockify_support_cli_final.py --selftest`
 - [ ] Run smoke tests: `bash scripts/smoke.sh`
 - [ ] Test query: `python3 clockify_support_cli_final.py ask "How do I track time?"`
 
@@ -375,7 +399,7 @@ gunicorn -w 4 --threads 1 app:app
 3. `M1_COMPATIBILITY.md` – Platform-specific optimizations
 
 ### ✅ For Testing & Validation (15 min)
-1. Run: `python3 clockify_support_cli_final.py selftest`
+1. Run: `python3 clockify_support_cli_final.py --selftest`
 2. Run: `bash scripts/smoke.sh`
 3. Run: `bash scripts/acceptance_test.sh`
 
@@ -469,7 +493,7 @@ For questions about:
 - **Quick Start**: See [Quick Start](#quick-start) above
 - **M1 Installation**: See `M1_COMPATIBILITY.md`
 - **Architecture**: See `CLAUDE.md`
-- **Testing**: Run `python3 clockify_support_cli_final.py selftest`
+- **Testing**: Run `python3 clockify_support_cli_final.py --selftest`
 - **Troubleshooting**: See `M1_COMPATIBILITY.md` (troubleshooting section)
 
 ### Common Issues

@@ -37,6 +37,9 @@ try:
     from rank_bm25 import BM25Okapi
 except ImportError:  # pragma: no cover - handled at runtime
     BM25Okapi = None  # type: ignore[assignment]
+MRR_THRESHOLD = 0.70
+PRECISION_THRESHOLD = 0.60
+NDCG_THRESHOLD = 0.65
 
 # Add current directory to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -274,6 +277,23 @@ def evaluate(dataset_path="eval_datasets/clockify_v1.jsonl", verbose=False):
             print(f"Error building lexical index: {exc}")
             sys.exit(1)
 
+        from clockify_support_cli_final import load_index, retrieve
+    except ImportError as e:
+        print(f"Error importing RAG functions: {e}")
+        sys.exit(1)
+
+    # Load index
+    print("Loading knowledge base index...")
+    try:
+        result = load_index()
+        if result is None:
+            print("Error: Failed to load index")
+            sys.exit(1)
+        chunks, vecs_n, bm, hnsw = result
+    except Exception as e:
+        print(f"Error loading index: {e}")
+        sys.exit(1)
+
     # Load evaluation dataset
     dataset = []
     with open(dataset_path, "r", encoding="utf-8") as f:
@@ -302,6 +322,8 @@ def evaluate(dataset_path="eval_datasets/clockify_v1.jsonl", verbose=False):
         try:
             # Retrieve chunks using RAG system
             retrieved_ids = list(retrieval_fn(query)) if retrieval_fn else []
+            selected, _ = retrieve(query, chunks, vecs_n, bm, top_k=12, hnsw=hnsw)
+            retrieved_ids = list(selected)
 
             # Compute metrics
             mrr = compute_mrr(retrieved_ids, relevant_ids)
@@ -360,6 +382,8 @@ def evaluate(dataset_path="eval_datasets/clockify_v1.jsonl", verbose=False):
             f"✅ MRR@10 ≥ {SUCCESS_THRESHOLDS['mrr_at_10']:.2f}: "
             "Excellent - first relevant result typically in top 2"
         )
+    if results['mrr_at_10'] >= MRR_THRESHOLD:
+        print(f"✅ MRR@10 ≥ {MRR_THRESHOLD:.2f}: Excellent - first relevant result typically in top 2")
     elif results['mrr_at_10'] >= 0.50:
         print("⚠️  MRR@10 ≥ 0.50: Good - first relevant result typically in top 3-4")
     else:
@@ -370,6 +394,8 @@ def evaluate(dataset_path="eval_datasets/clockify_v1.jsonl", verbose=False):
             f"✅ Precision@5 ≥ {SUCCESS_THRESHOLDS['precision_at_5']:.2f}: "
             "Excellent - majority of top 5 are relevant"
         )
+    if results['precision_at_5'] >= PRECISION_THRESHOLD:
+        print(f"✅ Precision@5 ≥ {PRECISION_THRESHOLD:.2f}: Excellent - majority of top 5 are relevant")
     elif results['precision_at_5'] >= 0.40:
         print("⚠️  Precision@5 ≥ 0.40: Good - decent relevance in top results")
     else:
@@ -380,6 +406,8 @@ def evaluate(dataset_path="eval_datasets/clockify_v1.jsonl", verbose=False):
             f"✅ NDCG@10 ≥ {SUCCESS_THRESHOLDS['ndcg_at_10']:.2f}: "
             "Excellent - relevant results well-ranked"
         )
+    if results['ndcg_at_10'] >= NDCG_THRESHOLD:
+        print(f"✅ NDCG@10 ≥ {NDCG_THRESHOLD:.2f}: Excellent - relevant results well-ranked")
     elif results['ndcg_at_10'] >= 0.50:
         print("⚠️  NDCG@10 ≥ 0.50: Good - reasonable ranking quality")
     else:
@@ -437,3 +465,12 @@ if __name__ == "__main__":
         sys.exit(1)
 
     sys.exit(0)
+    # Exit with appropriate code based on results
+    if (
+        results['mrr_at_10'] >= MRR_THRESHOLD
+        and results['precision_at_5'] >= PRECISION_THRESHOLD
+        and results['ndcg_at_10'] >= NDCG_THRESHOLD
+    ):
+        sys.exit(0)  # Success
+    else:
+        sys.exit(1)  # Metrics below target

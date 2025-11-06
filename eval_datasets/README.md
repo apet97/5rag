@@ -50,6 +50,58 @@ This approach keeps the dataset stable across rebuilds while still pointing to
 concrete passages in the knowledge base. If additional curation is needed you
 can edit the `relevant_chunks` list manually—any combination of title + section
 found in `chunks.jsonl` will be resolved by the evaluation script.
+```bash
+# 1. Load chunks.jsonl
+python3 -c "
+import json
+with open('chunks.jsonl') as f:
+    chunks = [json.loads(line) for line in f if line.strip()]
+
+# 2. Search for keywords
+query = 'time tracking'
+for i, chunk in enumerate(chunks):
+    if query.lower() in chunk['text'].lower():
+        print(f\"Chunk {i}: {chunk['id'][:8]}... - {chunk['title']}\")
+        print(f\"  {chunk['text'][:100]}...\")
+        print()
+"
+```
+
+#### Method 2: Automated with Current System
+
+```bash
+# Run queries and capture which chunks were retrieved
+python3 clockify_support_cli_final.py ask "How do I track time?" --debug
+
+# Note the chunk IDs shown in debug output
+# Manually verify they're actually relevant
+# Add IDs to the dataset
+```
+
+#### Method 3: Helper Script (Interactive or Automatic)
+
+Use `scripts/populate_eval.py` to combine keyword heuristics with an
+interactive review loop:
+
+```bash
+# Populate chunk IDs with interactive confirmation
+python scripts/populate_eval.py \
+  --dataset eval_datasets/clockify_v1.jsonl \
+  --chunks chunks.jsonl
+
+# Automatically accept high-confidence matches (no prompts)
+python scripts/populate_eval.py --auto
+```
+
+The script will:
+
+1. Load `chunks.jsonl` and score chunks using keywords from the query,
+   tags, and notes.
+2. Surface the highest scoring candidates for manual confirmation, or
+   automatically assign them when `--auto` is used.
+3. Write the populated dataset to
+   `eval_datasets/clockify_v1_populated.jsonl` (use `--output` to change
+   the path).
 
 ### Evaluation Metrics
 
