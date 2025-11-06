@@ -299,9 +299,75 @@ If source KB changes, rebuild is automatically triggered.
 
 ---
 
-**Version**: 2.0 Recommended (1.0 also available)
+## Modular Architecture (v5.0 - NEW!)
+
+**Status**: ✅ Production Ready with Modular Structure & Plugin System
+
+As of v5.0, the system has been refactored into a clean, modular package with plugin architecture:
+
+### Package Structure
+
+```
+clockify_rag/                  # Main package (NEW)
+├── __init__.py                # Package exports
+├── config.py                  # Configuration constants
+├── exceptions.py              # Custom exceptions
+├── utils.py                   # File I/O, validation, logging
+├── http_utils.py              # HTTP session management
+├── chunking.py                # Text parsing & chunking
+├── embedding.py               # Embeddings (local/Ollama)
+├── caching.py                 # Query cache & rate limiting
+├── indexing.py                # BM25 & FAISS indexes
+└── plugins/                   # Plugin system (NEW)
+    ├── __init__.py
+    ├── interfaces.py          # Plugin interfaces
+    ├── registry.py            # Plugin registry
+    └── examples.py            # Example plugins
+```
+
+### Using the Modular Package
+
+```python
+# Import specific components
+from clockify_rag import build, load_index
+from clockify_rag.chunking import build_chunks
+from clockify_rag.embedding import embed_texts
+from clockify_rag.plugins import RetrieverPlugin, register_plugin
+```
+
+### Backward Compatibility
+
+The original CLI interface is fully preserved:
+```bash
+python3 clockify_support_cli.py build knowledge_full.md
+python3 clockify_support_cli.py chat --debug
+```
+
+### Plugin System
+
+Create custom retrievers, rerankers, embeddings, and indexes:
+
+```python
+from clockify_rag.plugins import RetrieverPlugin, register_plugin
+
+class MyRetriever(RetrieverPlugin):
+    def retrieve(self, question: str, top_k: int):
+        # Custom retrieval logic
+        return results
+
+    def get_name(self) -> str:
+        return "my_retriever"
+
+register_plugin(MyRetriever())
+```
+
+**See [MODULARIZATION.md](MODULARIZATION.md) for complete documentation.**
+
+---
+
+**Version**: 5.0 (Modular with Plugin Architecture)
 **Status**: ✅ Production Ready
-**Date**: 2025-11-05
+**Date**: 2025-11-06
 **Platform**: macOS/Linux (v1.0 and v2.0); Windows requires manual venv setup
 **Python**: 3.7+
 **Apple Silicon**: ✅ M1/M2/M3 Compatible - See [M1_COMPATIBILITY.md](M1_COMPATIBILITY.md) for installation guide
