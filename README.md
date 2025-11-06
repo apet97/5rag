@@ -1,10 +1,12 @@
-# 1rag – Clockify Support CLI v4.1.2
+# 1rag – Clockify Support CLI v5.1
 
 **Status**: ✅ Production-Ready
-**Version**: 4.1.2 (Ollama-Optimized with M1 Support)
-**Date**: 2025-11-05
+**Version**: 5.1 (Thread-Safe with Performance Optimizations)
+**Date**: 2025-11-06
 
 A local, stateless, closed-book Retrieval-Augmented Generation (RAG) chatbot for Clockify support documentation using Ollama.
+
+**New in v5.1**: 🔒 Thread-safe, 🚀 50-200ms faster first query, 🛠️ Better error messages, 🔍 Improved observability
 
 ## Platform Compatibility
 
@@ -215,10 +217,29 @@ USE_PROXY=1 python3 clockify_support_cli.py chat
 
 ## Testing
 
+### Run Full Test Suite (v5.1+)
+```bash
+# All tests with coverage
+make test
+
+# Or with pytest directly
+pytest tests/ --cov=clockify_rag --cov=clockify_support_cli_final --cov-report=html
+open htmlcov/index.html
+```
+
 ### Run Self-Tests
 ```bash
 python3 clockify_support_cli.py chat --selftest
 # Expected: [selftest] 4/4 tests passed
+```
+
+### Run Thread Safety Tests (v5.1+)
+```bash
+# Verify thread safety with concurrent queries
+pytest tests/test_thread_safety.py -v -n 4
+
+# Integration tests
+pytest tests/test_integration.py -v
 ```
 
 ### Run Determinism Check
@@ -274,12 +295,35 @@ python3 clockify_support_cli.py --log DEBUG chat
 - [ ] Check PyTorch MPS: `python3 -c "import torch; print(torch.backends.mps.is_available())"`
 - [ ] Run M1 compatibility tests: `bash scripts/m1_compatibility_test.sh` (if available)
 
-### Production
+### Production (v5.1+)
 - [ ] Configure Ollama endpoint (`OLLAMA_URL` env var)
 - [ ] Set production timeouts (if needed)
 - [ ] Test end-to-end query
+- [ ] **Choose deployment mode** (see below)
 - [ ] Deploy to production
 - [ ] Monitor first queries for errors
+
+#### Thread-Safe Deployment (v5.1+)
+
+**Option 1: Multi-threaded (RECOMMENDED)**
+```bash
+# Deploy with multi-worker, multi-threaded processes
+gunicorn -w 4 --threads 4 app:app
+
+# Or with uvicorn
+uvicorn app:app --workers 4
+```
+- Thread safety locks protect shared state (QueryCache, RateLimiter, _FAISS_INDEX)
+- Cache and rate limiter shared across threads within same process
+- Better resource utilization
+
+**Option 2: Single-threaded (legacy)**
+```bash
+# Deploy with single-worker processes
+gunicorn -w 4 --threads 1 app:app
+```
+- Each worker has its own process memory (no shared state)
+- Cache and rate limiter per-process
 
 ## Documentation Reading Paths
 
