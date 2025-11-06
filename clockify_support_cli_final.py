@@ -290,7 +290,7 @@ def build_faiss_index(vecs: np.ndarray, nlist: int = 256, metric: str = "ip") ->
     logger.debug(f"Built FAISS index: nlist={nlist}, nprobe={ANN_NPROBE}, vectors={len(vecs)}, platform={'arm64' if is_macos_arm64 else 'standard'}")
     return index
 
-def save_faiss_index(index, path: str = None):
+def save_faiss_index(index, path: str | None = None):
     """Save FAISS index to disk."""
     if index is None or path is None:
         return
@@ -299,7 +299,7 @@ def save_faiss_index(index, path: str = None):
         faiss.write_index(index, path)
         logger.debug(f"Saved FAISS index to {path}")
 
-def load_faiss_index(path: str = None) -> object:
+def load_faiss_index(path: str | None = None) -> object | None:
     """Load FAISS index from disk."""
     if path is None or not os.path.exists(path):
         return None
@@ -326,14 +326,14 @@ def hybrid_score(bm25_score: float, dense_score: float, alpha: float = 0.5) -> f
     return alpha * bm25_score + (1 - alpha) * dense_score
 
 # ====== DYNAMIC PACKING (v4.1 - Section 5) ======
-def pack_snippets_dynamic(chunk_ids: list, chunks: dict, budget_tokens: int = None, target_util: float = 0.75) -> tuple:
+def pack_snippets_dynamic(chunk_ids: list, chunks: dict, budget_tokens: int | None = None, target_util: float = 0.75) -> tuple:
     """Pack snippets with dynamic targeting. Returns (snippets, used_tokens, was_truncated)."""
     if budget_tokens is None:
         budget_tokens = CTX_TOKEN_BUDGET
     if not chunk_ids:
         return [], 0, False
 
-    snippets = []
+    snippets: list[str] = []
     token_count = 0
     target = int(budget_tokens * target_util)
 
@@ -1788,7 +1788,7 @@ class RateLimiter:
         """
         self.max_requests = max_requests
         self.window_seconds = window_seconds
-        self.requests = deque()
+        self.requests: deque[float] = deque()
 
     def allow_request(self) -> bool:
         """Check if request is allowed under rate limit.
@@ -1842,8 +1842,8 @@ class QueryCache:
         """
         self.maxsize = maxsize
         self.ttl_seconds = ttl_seconds
-        self.cache = {}  # {question_hash: (answer, metadata, timestamp)}
-        self.access_order = deque()  # For LRU eviction
+        self.cache: dict[str, tuple[str, dict, float]] = {}  # {question_hash: (answer, metadata, timestamp)}
+        self.access_order: deque[str] = deque()  # For LRU eviction
         self.hits = 0
         self.misses = 0
 

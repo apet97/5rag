@@ -1,4 +1,4 @@
-.PHONY: help venv install selftest build chat smoke clean
+.PHONY: help venv install selftest build chat smoke clean test eval typecheck lint format
 
 help:
 	@echo "v4.1 Clockify RAG CLI - Make Targets"
@@ -9,6 +9,11 @@ help:
 	@echo "  make selftest   - Run self-test suite"
 	@echo "  make chat       - Start interactive chat (REPL)"
 	@echo "  make smoke      - Run full smoke test suite"
+	@echo "  make test       - Run unit tests with coverage"
+	@echo "  make eval       - Run RAG evaluation on ground truth dataset"
+	@echo "  make typecheck  - Run mypy static type checking"
+	@echo "  make lint       - Run ruff linter"
+	@echo "  make format     - Format code with black"
 	@echo "  make clean      - Remove generated artifacts and cache"
 	@echo ""
 	@echo "Quick start:"
@@ -63,9 +68,22 @@ eval:
 	@echo "Running RAG evaluation on ground truth dataset..."
 	python3 eval.py
 
+typecheck:
+	@echo "Running mypy type checking..."
+	python3 -m mypy clockify_support_cli_final.py --config-file pyproject.toml
+
+lint:
+	@echo "Running ruff linter..."
+	python3 -m ruff check clockify_support_cli_final.py --config pyproject.toml
+
+format:
+	@echo "Formatting code with black..."
+	python3 -m black clockify_support_cli_final.py --config pyproject.toml
+
 clean:
 	@echo "Cleaning generated artifacts..."
 	rm -f chunks.jsonl vecs_n.npy vecs.npy meta.jsonl bm25.json index.meta.json
 	rm -f faiss.index hnsw_cosine.bin emb_cache.jsonl
-	rm -f .build.lock .shim.pid shim.log build.log smoke.log
+	rm -f .build.lock .shim.pid shim.log build.log smoke.log query.log audit.jsonl
+	rm -rf .mypy_cache .pytest_cache htmlcov .ruff_cache
 	@echo "✅ Clean complete"
