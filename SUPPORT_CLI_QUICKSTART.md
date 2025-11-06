@@ -13,7 +13,7 @@ source rag_env/bin/activate
 
 ### 2. Build Index (one-time, ~5–10 min)
 ```bash
-python3 clockify_support_cli.py build knowledge_full.md
+python3 clockify_support_cli_final.py build knowledge_full.md
 ```
 
 **You'll see**:
@@ -39,7 +39,7 @@ BUILDING KNOWLEDGE BASE
 
 ### 3. Start Chat
 ```bash
-python3 clockify_support_cli.py chat
+python3 clockify_support_cli_final.py chat
 ```
 
 ### 4. Ask Questions
@@ -60,12 +60,19 @@ python3 clockify_support_cli.py chat
 [Done]
 ```
 
+### 5. One-Off Question (Non-Interactive)
+```bash
+python3 clockify_support_cli_final.py ask "How do I track time offline?" --rerank --json
+```
+
+**Tip:** `ask` accepts the same retrieval controls as `chat` (`--topk`, `--pack`, `--threshold`, `--rerank`) plus `--json` for structured output, making it easy to script one-shot answers.
+
 ---
 
 ## What's Better Than v1.0?
 
 ✅ **Hybrid Retrieval**: BM25 (keywords) + Dense (semantics) = better accuracy
-✅ **Single File**: All code in `clockify_support_cli.py`
+✅ **Single File**: All code in `clockify_support_cli_final.py`
 ✅ **Stateless REPL**: No history; each question starts fresh
 ✅ **Better Snippets**: Title + URL + section for context
 ✅ **MMR Diversification**: Reduces duplicate near-sections
@@ -78,11 +85,11 @@ python3 clockify_support_cli.py chat
 | File | Purpose |
 |------|---------|
 | `chunks.jsonl` | Chunked knowledge base |
-| `vecs.npy` | Dense embeddings |
+| `vecs_n.npy` | Dense embeddings (normalized) |
 | `bm25.json` | BM25 index (keywords) |
 | `meta.jsonl` | Chunk metadata |
 
-**Cleanup & rebuild**: `rm chunks.jsonl vecs.npy meta.jsonl bm25.json && python3 clockify_support_cli.py build knowledge_full.md`
+**Cleanup & rebuild**: `rm chunks.jsonl vecs_n.npy meta.jsonl bm25.json && python3 clockify_support_cli_final.py build knowledge_full.md`
 
 ---
 
@@ -91,7 +98,7 @@ python3 clockify_support_cli.py chat
 ### Debug Retrieval
 
 ```bash
-python3 clockify_support_cli.py chat --debug
+python3 clockify_support_cli_final.py chat --debug
 
 > How do I invite team members?
 
@@ -110,12 +117,12 @@ python3 clockify_support_cli.py chat --debug
 
 ```bash
 export GEN_MODEL="mistral:7b"
-python3 clockify_support_cli.py chat
+python3 clockify_support_cli_final.py chat
 ```
 
 ### Tune Retrieval
 
-Edit constants in `clockify_support_cli.py`:
+Edit constants in `clockify_support_cli_final.py`:
 
 ```python
 MMR_LAMBDA = 0.8          # Higher = more relevance, less diversity
@@ -123,7 +130,7 @@ LOW_COS_THRESH = 0.20     # Lower = accept more marginal matches
 PACK_TOP = 8              # More snippets = longer context
 ```
 
-Then rebuild: `python3 clockify_support_cli.py build knowledge_full.md`
+Then rebuild: `python3 clockify_support_cli_final.py build knowledge_full.md`
 
 ---
 
@@ -167,9 +174,10 @@ Check `:debug` to see what was retrieved.
 
 | Command | Meaning |
 |---------|---------|
-| `python3 clockify_support_cli.py build <path>` | Build/rebuild index |
-| `python3 clockify_support_cli.py chat` | Start chat loop |
-| `python3 clockify_support_cli.py chat --debug` | Chat with diagnostics |
+| `python3 clockify_support_cli_final.py build <path>` | Build/rebuild index |
+| `python3 clockify_support_cli_final.py chat` | Start chat loop |
+| `python3 clockify_support_cli_final.py chat --debug` | Chat with diagnostics |
+| `python3 clockify_support_cli_final.py ask "<question>" [options]` | Answer a single question (supports `--rerank`, `--topk`, `--json`) |
 | `:exit` | Quit chat loop |
 | `:debug` | Toggle diagnostics on/off |
 

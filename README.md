@@ -54,8 +54,8 @@ python3 clockify_support_cli_final.py chat
 # With debug mode
 python3 clockify_support_cli_final.py chat --debug
 
-# Single query
-python3 clockify_support_cli_final.py ask "How do I track time in Clockify?"
+# Single query (supports --rerank/--json/--topk/--pack)
+python3 clockify_support_cli_final.py ask "How do I track time in Clockify?" --rerank --json
 
 # Run self-tests
 python3 clockify_support_cli_final.py selftest
@@ -112,7 +112,7 @@ python3 clockify_support_cli_final.py chat [--debug] [--rerank]
 
 **Ask Command** (single query):
 ```bash
-python3 clockify_support_cli_final.py ask "Your question" [--json]
+python3 clockify_support_cli_final.py ask "Your question" [--rerank] [--topk 12] [--pack 6] [--threshold 0.30] [--json]
 ```
 
 **Self-Test Command**:

@@ -2752,12 +2752,9 @@ def run_selftest():
     return all(status == "PASS" for _, status in results)
 
 # ====== REPL ======
-def chat_repl(top_k=12, pack_top=6, threshold=0.30, use_rerank=False, debug=False, seed=DEFAULT_SEED, num_ctx=DEFAULT_NUM_CTX, num_predict=DEFAULT_NUM_PREDICT, retries=0, use_json=False):
-    """Stateless REPL loop - Task I. v4.1: JSON output support."""
-    # Task I: log config summary at startup
-    _log_config_summary(use_rerank=use_rerank, pack_top=pack_top, seed=seed, threshold=threshold, top_k=top_k, num_ctx=num_ctx, num_predict=num_predict, retries=retries)
+def ensure_index_ready(retries=0):
+    """Ensure retrieval artifacts are present and return loaded index components."""
 
-    # Lazy build and startup sanity check
     artifacts_ok = True
     for fname in [FILES["chunks"], FILES["emb"], FILES["meta"], FILES["bm25"], FILES["index_meta"]]:
         if not os.path.exists(fname):
@@ -2765,28 +2762,37 @@ def chat_repl(top_k=12, pack_top=6, threshold=0.30, use_rerank=False, debug=Fals
             break
 
     if not artifacts_ok:
-        logger.info(f"[rebuild] artifacts missing or invalid: building from knowledge_full.md...")
+        logger.info("[rebuild] artifacts missing or invalid: building from knowledge_full.md...")
         if os.path.exists("knowledge_full.md"):
             build("knowledge_full.md", retries=retries)
         else:
-            logger.error(f"knowledge_full.md not found")
-            sys.exit(1)
+            logger.error("knowledge_full.md not found")
+            raise SystemExit(1)
 
     result = load_index()
     if result is None:
-        logger.info(f"[rebuild] artifact validation failed: rebuilding...")
+        logger.info("[rebuild] artifact validation failed: rebuilding...")
         if os.path.exists("knowledge_full.md"):
             build("knowledge_full.md", retries=retries)
             result = load_index()
         else:
-            logger.error(f"knowledge_full.md not found")
-            sys.exit(1)
+            logger.error("knowledge_full.md not found")
+            raise SystemExit(1)
 
     if result is None:
-        logger.error(f"Failed to load artifacts after rebuild")
-        sys.exit(1)
+        logger.error("Failed to load artifacts after rebuild")
+        raise SystemExit(1)
 
-    chunks, vecs_n, bm, hnsw = result
+    return result
+
+
+def chat_repl(top_k=12, pack_top=6, threshold=0.30, use_rerank=False, debug=False, seed=DEFAULT_SEED, num_ctx=DEFAULT_NUM_CTX, num_predict=DEFAULT_NUM_PREDICT, retries=0, use_json=False):
+    """Stateless REPL loop - Task I. v4.1: JSON output support."""
+    # Task I: log config summary at startup
+    _log_config_summary(use_rerank=use_rerank, pack_top=pack_top, seed=seed, threshold=threshold, top_k=top_k, num_ctx=num_ctx, num_predict=num_predict, retries=retries)
+
+    # Lazy build and startup sanity check
+    chunks, vecs_n, bm, hnsw = ensure_index_ready(retries=retries)
 
     print("\n" + "=" * 70)
     print("CLOCKIFY SUPPORT – Local, Stateless, Closed-Book")
@@ -2931,6 +2937,25 @@ def main():
                    help="Hybrid scoring blend: alpha*BM25 + (1-alpha)*dense (default 0.5)")
     c.add_argument("--json", action="store_true", help="Output answer as JSON with metrics (v4.1)")
 
+    a = subparsers.add_parser("ask", help="Answer a single question and exit")
+    a.add_argument("question", help="Question to answer")
+    a.add_argument("--debug", action="store_true", help="Print retrieval diagnostics")
+    a.add_argument("--rerank", action="store_true", help="Enable LLM-based reranking")
+    a.add_argument("--topk", type=int, default=DEFAULT_TOP_K, help="Top-K candidates (default 12)")
+    a.add_argument("--pack", type=int, default=DEFAULT_PACK_TOP, help="Snippets to pack (default 6)")
+    a.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD, help="Cosine threshold (default 0.30)")
+    a.add_argument("--seed", type=int, default=DEFAULT_SEED, help="Random seed for LLM (default 42)")
+    a.add_argument("--num-ctx", type=int, default=DEFAULT_NUM_CTX, help="LLM context window (default 8192)")
+    a.add_argument("--num-predict", type=int, default=DEFAULT_NUM_PREDICT, help="LLM max generation tokens (default 512)")
+    a.add_argument("--retries", type=int, default=DEFAULT_RETRIES, help="Retries for transient errors (default 0)")
+    a.add_argument("--emb-backend", choices=["local", "ollama"], default=EMB_BACKEND,
+                   help="Embedding backend: local (SentenceTransformer) or ollama (default local)")
+    a.add_argument("--ann", choices=["faiss", "none"], default=USE_ANN,
+                   help="ANN index: faiss (IVFFlat) or none (full-scan, default faiss)")
+    a.add_argument("--alpha", type=float, default=ALPHA_HYBRID,
+                   help="Hybrid scoring blend: alpha*BM25 + (1-alpha)*dense (default 0.5)")
+    a.add_argument("--json", action="store_true", help="Output answer as JSON with metrics (v4.1)")
+
     # v4.1: Ollama optimization flags (Section 7)
     ap.add_argument("--emb-backend", choices=["local", "ollama"], default=EMB_BACKEND,
                    help="Embedding backend: local (SentenceTransformer) or ollama (default local)")
@@ -2979,6 +3004,50 @@ def main():
 
     if args.cmd == "build":
         build(args.md_path, retries=getattr(args, "retries", 0))
+        return
+
+    if args.cmd == "ask":
+        _log_config_summary(
+            use_rerank=args.rerank,
+            pack_top=args.pack,
+            seed=args.seed,
+            threshold=args.threshold,
+            top_k=args.topk,
+            num_ctx=args.num_ctx,
+            num_predict=args.num_predict,
+            retries=getattr(args, "retries", 0)
+        )
+        chunks, vecs_n, bm, hnsw = ensure_index_ready(retries=getattr(args, "retries", 0))
+        ans, meta = answer_once(
+            args.question,
+            chunks,
+            vecs_n,
+            bm,
+            top_k=args.topk,
+            pack_top=args.pack,
+            threshold=args.threshold,
+            use_rerank=args.rerank,
+            debug=args.debug,
+            hnsw=hnsw,
+            seed=args.seed,
+            num_ctx=args.num_ctx,
+            num_predict=args.num_predict,
+            retries=getattr(args, "retries", 0)
+        )
+        if getattr(args, "json", False):
+            used_tokens = meta.get("used_tokens")
+            if used_tokens is None:
+                used_tokens = len(meta.get("selected", []))
+            output = answer_to_json(
+                ans,
+                meta.get("selected", []),
+                used_tokens,
+                args.topk,
+                args.pack
+            )
+            print(json.dumps(output, ensure_ascii=False, indent=2))
+        else:
+            print(ans)
         return
 
     if args.cmd == "chat":
