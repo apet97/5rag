@@ -23,9 +23,28 @@ DESIGN
 - No external APIs or web calls
 """
 
-import os, re, sys, json, math, uuid, time, argparse, pathlib, unicodedata, subprocess, logging, hashlib, atexit, tempfile, errno, platform
+# Standard library imports (Rank 26: Formatted per PEP 8)
+import argparse
+import atexit
+import errno
+import hashlib
+import json
+import logging
+import math
+import os
+import pathlib
+import platform
+import re
+import subprocess
+import sys
+import tempfile
+import time
+import unicodedata
+import uuid
 from collections import Counter, defaultdict, deque
 from contextlib import contextmanager
+
+# Third-party imports
 import numpy as np
 import requests
 
@@ -622,7 +641,7 @@ def _log_config_summary(use_rerank=False, pack_top=DEFAULT_PACK_TOP, seed=DEFAUL
     # Task I: Print refusal string once for sanity
     logger.info(f'REFUSAL_STR="{REFUSAL_STR}"')
 
-# ====== SYSTEM PROMPT ======
+# ====== SYSTEM PROMPT (Rank 25: Few-shot examples added) ======
 SYSTEM_PROMPT = f"""You are CAKE.com Internal Support for Clockify.
 Closed-book. Only use SNIPPETS. If info is missing, reply exactly:
 "{REFUSAL_STR}"
@@ -634,7 +653,28 @@ Rules:
   2) Steps
   3) Notes by role/plan/region if relevant
   4) Citations: list the snippet IDs you used, like [id1, id2], and include URLs in-line if present.
-- If SNIPPETS disagree, state the conflict and offer safest interpretation."""
+- If SNIPPETS disagree, state the conflict and offer safest interpretation.
+
+EXAMPLES:
+
+Q: How do I track time?
+SNIPPETS: [id_1] Click the timer button in the top right corner to start tracking time. You can also manually enter time entries.
+A: To track time, click the timer button in the top right corner. You can also manually enter time entries afterward. [id_1]
+
+Q: What is the universe?
+SNIPPETS: [id_2] Clockify is a time tracking tool for teams.
+A: {REFUSAL_STR}
+
+Q: What are the pricing tiers?
+SNIPPETS: [id_3] Free plan includes unlimited users. Basic is $3.99/user/month. Standard is $5.49/user/month. Pro is $7.99/user/month.
+A: Clockify offers four pricing tiers:
+- Free: Unlimited users, basic features
+- Basic: $3.99/user/month
+- Standard: $5.49/user/month
+- Pro: $7.99/user/month
+[id_3]
+
+Now answer the user's question:"""
 
 USER_WRAPPER = """SNIPPETS:
 {snips}
