@@ -2236,9 +2236,29 @@ def log_query(query, answer, retrieved_chunks, latency_ms, refused=False, metada
         refused: Whether answer was refused (returned REFUSAL_STR)
         metadata: Optional dict with additional metadata (debug, backend, etc.)
     """
-    # Extract chunk IDs and scores
-    chunk_ids = [c["id"] if isinstance(c, dict) else c for c in retrieved_chunks]
-    chunk_scores = [c.get("score", 0.0) if isinstance(c, dict) else 0.0 for c in retrieved_chunks]
+    normalized_chunks = []
+    for chunk in retrieved_chunks:
+        if isinstance(chunk, dict):
+            normalized = chunk.copy()
+            chunk_id = normalized.get("id") or normalized.get("chunk_id")
+            normalized["id"] = chunk_id
+            normalized["dense"] = float(normalized.get("dense", normalized.get("score", 0.0)))
+            normalized["bm25"] = float(normalized.get("bm25", 0.0))
+            normalized["hybrid"] = float(normalized.get("hybrid", normalized["dense"]))
+        else:
+            normalized = {
+                "id": chunk,
+                "dense": 0.0,
+                "bm25": 0.0,
+                "hybrid": 0.0,
+            }
+        normalized_chunks.append(normalized)
+
+    chunk_ids = [c.get("id") for c in normalized_chunks]
+    dense_scores = [c.get("dense", 0.0) for c in normalized_chunks]
+    bm25_scores = [c.get("bm25", 0.0) for c in normalized_chunks]
+    hybrid_scores = [c.get("hybrid", 0.0) for c in normalized_chunks]
+    primary_scores = hybrid_scores if hybrid_scores else []
 
     log_entry = {
         "timestamp": time.time(),
@@ -2248,11 +2268,17 @@ def log_query(query, answer, retrieved_chunks, latency_ms, refused=False, metada
         "answer_length": len(answer),
         "num_chunks_retrieved": len(chunk_ids),
         "chunk_ids": chunk_ids,
-        "avg_chunk_score": float(np.mean(chunk_scores)) if chunk_scores else 0.0,
-        "max_chunk_score": float(np.max(chunk_scores)) if chunk_scores else 0.0,
+        "chunk_scores": {
+            "dense": dense_scores,
+            "bm25": bm25_scores,
+            "hybrid": hybrid_scores,
+        },
+        "retrieved_chunks": normalized_chunks,
+        "avg_chunk_score": float(np.mean(primary_scores)) if primary_scores else 0.0,
+        "max_chunk_score": float(np.max(primary_scores)) if primary_scores else 0.0,
         "latency_ms": latency_ms,
         "refused": refused,
-        "metadata": metadata or {}
+        "metadata": metadata or {},
     }
 
     try:
@@ -2493,8 +2519,22 @@ def answer_once(
         )
         timings["rerank"] = rerank_timing
 
+        dense_scores_all = scores["dense"]
+        bm25_scores_all = scores["bm25"]
+        hybrid_scores_all = scores["hybrid"]
+        chunk_id_to_index = {chunk["id"]: idx for idx, chunk in enumerate(chunks)}
+        chunk_scores_by_id = {}
+        for cid, idx in chunk_id_to_index.items():
+            chunk_scores_by_id[cid] = {
+                "index": idx,
+                "dense": float(dense_scores_all[idx]),
+                "bm25": float(bm25_scores_all[idx]),
+                "hybrid": float(hybrid_scores_all[idx]),
+            }
+        mmr_rank_by_id = {chunks[idx]["id"]: rank for rank, idx in enumerate(mmr_selected)}
+
         # Step 4: Coverage check
-        coverage_pass = coverage_ok(mmr_selected, scores["dense"], threshold)
+        coverage_pass = coverage_ok(mmr_selected, dense_scores_all, threshold)
         if not coverage_pass:
             if debug:
                 print(f"\n[DEBUG] Coverage failed: {len(mmr_selected)} selected, need ≥2 @ {threshold}")
@@ -2502,10 +2542,28 @@ def answer_once(
 
             # Log refusal
             latency_ms = int((time.time() - turn_start) * 1000)
+            refusal_chunks = []
+            for rank, idx in enumerate(mmr_selected):
+                chunk_id = chunks[idx]["id"]
+                info = chunk_scores_by_id.get(chunk_id)
+                if info is None:
+                    continue
+                entry = {
+                    "id": chunk_id,
+                    "mmr_rank": rank,
+                    "dense": info["dense"],
+                    "bm25": info["bm25"],
+                    "hybrid": info["hybrid"],
+                }
+                rerank_score = rerank_scores.get(info["index"])
+                if rerank_score is not None:
+                    entry["rerank_score"] = float(rerank_score)
+                refusal_chunks.append(entry)
+
             log_query(
                 query=question,
                 answer=REFUSAL_STR,
-                retrieved_chunks=mmr_selected,
+                retrieved_chunks=refusal_chunks,
                 latency_ms=latency_ms,
                 refused=True,
                 metadata={"debug": debug, "backend": EMB_BACKEND, "coverage_pass": False}
@@ -2574,14 +2632,25 @@ def answer_once(
 
         # Log successful query
         latency_ms = int(timings['total'] * 1000)
-        chunk_id_to_index = {chunk["id"]: idx for idx, chunk in enumerate(chunks)}
-        dense_scores = scores["dense"]
-        retrieved_chunks = [
-            {"id": cid, "score": float(dense_scores[idx])}
-            for cid in ids
-            for idx in [chunk_id_to_index.get(cid)]
-            if idx is not None and 0 <= idx < len(dense_scores)
-        ]
+        retrieved_chunks = []
+        for pack_rank, chunk_id in enumerate(ids):
+            info = chunk_scores_by_id.get(chunk_id)
+            if info is None:
+                continue
+            entry = {
+                "id": chunk_id,
+                "pack_rank": pack_rank,
+                "dense": info["dense"],
+                "bm25": info["bm25"],
+                "hybrid": info["hybrid"],
+            }
+            mmr_rank = mmr_rank_by_id.get(chunk_id)
+            if mmr_rank is not None:
+                entry["mmr_rank"] = mmr_rank
+            rerank_score = rerank_scores.get(info["index"])
+            if rerank_score is not None:
+                entry["rerank_score"] = float(rerank_score)
+            retrieved_chunks.append(entry)
 
         log_query(
             query=question,
