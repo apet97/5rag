@@ -2568,10 +2568,19 @@ def answer_once(
 
         # Log successful query
         latency_ms = int(timings['total'] * 1000)
+        chunk_id_to_index = {chunk["id"]: idx for idx, chunk in enumerate(chunks)}
+        dense_scores = scores["dense"]
+        retrieved_chunks = [
+            {"id": cid, "score": float(dense_scores[idx])}
+            for cid in ids
+            for idx in [chunk_id_to_index.get(cid)]
+            if idx is not None and 0 <= idx < len(dense_scores)
+        ]
+
         log_query(
             query=question,
             answer=ans,
-            retrieved_chunks=[{"id": cid, "score": scores["dense"].get(cid, 0.0)} for cid in ids],
+            retrieved_chunks=retrieved_chunks,
             latency_ms=latency_ms,
             refused=False,
             metadata={
