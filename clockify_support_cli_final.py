@@ -202,7 +202,16 @@ def _resolve_query_expansion_path():
     return _DEFAULT_QUERY_EXPANSION_PATH
 
 def _read_query_expansion_file(path):
+    # Priority #11: Add max file size guard for security (prevent DoS via large config files)
+    MAX_EXPANSION_FILE_SIZE = int(os.environ.get("MAX_QUERY_EXPANSION_FILE_SIZE", str(10 * 1024 * 1024)))  # 10 MB default
     try:
+        file_size = os.path.getsize(path)
+        if file_size > MAX_EXPANSION_FILE_SIZE:
+            raise ValueError(
+                f"Query expansion file too large ({file_size} bytes, max {MAX_EXPANSION_FILE_SIZE}). "
+                f"Set MAX_QUERY_EXPANSION_FILE_SIZE env var to override."
+            )
+
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
     except FileNotFoundError as exc:
@@ -423,6 +432,10 @@ def build_faiss_index(vecs: np.ndarray, nlist: int = 256, metric: str = "ip") ->
             quantizer = faiss.IndexFlatIP(dim)
             index = faiss.IndexIVFFlat(quantizer, dim, m1_nlist, faiss.METRIC_INNER_PRODUCT)
 
+            # Seed FAISS k-means for deterministic training (Priority #4)
+            # FAISS has internal randomness in k-means clustering that needs explicit seeding
+            faiss.seed(DEFAULT_SEED)
+
             # Train on small subset to minimize segfault risk
             rng = np.random.default_rng(DEFAULT_SEED)
             if len(vecs) >= m1_train_size:
@@ -447,6 +460,10 @@ def build_faiss_index(vecs: np.ndarray, nlist: int = 256, metric: str = "ip") ->
         # Other platforms: use IVFFlat with standard nlist (default=256, or reduced to 64 from env)
         quantizer = faiss.IndexFlatIP(dim)
         index = faiss.IndexIVFFlat(quantizer, dim, nlist, faiss.METRIC_INNER_PRODUCT)
+
+        # Seed FAISS k-means for deterministic training (Priority #4)
+        # FAISS has internal randomness in k-means clustering that needs explicit seeding
+        faiss.seed(DEFAULT_SEED)
 
         # Train on sample to build centroids
         rng = np.random.default_rng(DEFAULT_SEED)
