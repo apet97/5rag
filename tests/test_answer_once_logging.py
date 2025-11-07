@@ -111,4 +111,9 @@ def test_answer_once_logs_retrieved_chunks_with_cache(monkeypatch):
     assert cached_answer == "answer"
     assert cached_metadata["cached"] is True
     assert cached_metadata["cache_hit"] is True
-    assert len(logged_calls) == 1
+    # Priority #8: Cache hits are also logged with 'cached': True metadata
+    assert len(logged_calls) == 2
+
+    # Verify second call was for cache hit
+    assert logged_calls[1]["metadata"]["cached"] is True
+    assert "cache_age_seconds" in logged_calls[1]["metadata"]
