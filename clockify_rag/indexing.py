@@ -73,6 +73,9 @@ def build_faiss_index(vecs: np.ndarray, nlist: int = 256, metric: str = "ip") ->
             else:
                 train_vecs = vecs_f32
 
+            # Seed FAISS k-means for deterministic training
+            # FAISS has internal randomness in k-means clustering that needs explicit seeding
+            faiss.seed(DEFAULT_SEED)
             index.train(train_vecs)
             index.add(vecs_f32)
 
@@ -94,6 +97,10 @@ def build_faiss_index(vecs: np.ndarray, nlist: int = 256, metric: str = "ip") ->
         rng = np.random.default_rng(DEFAULT_SEED)
         train_indices = rng.choice(len(vecs), train_size, replace=False)
         train_vecs = vecs_f32[train_indices]
+
+        # Seed FAISS k-means for deterministic training
+        # FAISS has internal randomness in k-means clustering that needs explicit seeding
+        faiss.seed(DEFAULT_SEED)
         index.train(train_vecs)
         index.add(vecs_f32)
 

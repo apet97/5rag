@@ -293,6 +293,82 @@ python3 clockify_support_cli_final.py chat --debug
 # Should see: "macOS arm64 detected: using IndexFlatIP"
 ```
 
+## VPN and Network Troubleshooting
+
+### Issue 5: VPN Blocks Localhost Connections
+
+**Symptom**:
+```
+ConnectionError: Failed to connect to http://127.0.0.1:11434
+```
+
+**Possible Causes**:
+1. VPN software blocks localhost ports
+2. Ollama running on different machine
+3. Firewall rules blocking local connections
+
+**Solution 1: Verify Ollama is Running**
+```bash
+curl http://127.0.0.1:11434/api/version
+# Should return: {"version":"0.x.x"}
+```
+
+**Solution 2: Ollama on Remote Machine via VPN**
+```bash
+# Find Ollama machine IP (via VPN)
+ping ollama-server.vpn  # or use VPN IP
+
+# Configure endpoint
+export OLLAMA_URL="http://10.x.x.x:11434"
+python3 clockify_support_cli_final.py chat
+```
+
+**Solution 3: VPN Requires HTTP Proxy**
+```bash
+# Enable proxy support (disabled by default for security)
+export ALLOW_PROXIES=1
+export http_proxy="http://proxy.company.com:8080"
+export OLLAMA_URL="http://127.0.0.1:11434"
+python3 clockify_support_cli_final.py chat
+```
+
+**Solution 4: Bind Ollama to Different Port**
+```bash
+# If VPN blocks port 11434
+ollama serve --host 127.0.0.1:11435
+export OLLAMA_URL="http://127.0.0.1:11435"
+```
+
+### Environment Variables Reference
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `OLLAMA_URL` | `http://127.0.0.1:11434` | Ollama endpoint URL |
+| `ALLOW_PROXIES` | `0` (disabled) | Enable HTTP proxy support |
+| `http_proxy` | (none) | HTTP proxy server |
+| `https_proxy` | (none) | HTTPS proxy server |
+
+### VPN Testing Checklist
+
+```bash
+# 1. Test with VPN connected (Ollama local)
+export OLLAMA_URL="http://127.0.0.1:11434"
+python3 clockify_support_cli_final.py chat --debug
+
+# 2. Test with remote Ollama via VPN
+export OLLAMA_URL="http://10.x.x.x:11434"  # Replace with actual VPN IP
+curl "$OLLAMA_URL/api/version"  # Verify connectivity first
+python3 clockify_support_cli_final.py chat
+
+# 3. Test with VPN proxy (if required)
+export ALLOW_PROXIES=1
+export http_proxy="http://proxy:8080"
+export https_proxy="http://proxy:8080"
+python3 clockify_support_cli_final.py chat
+```
+
+**Note**: The default `127.0.0.1` (localhost) configuration is VPN-safe and works in most VPN environments. Only configure remote endpoints if Ollama runs on a different machine.
+
 ## Additional Resources
 
 - **PyTorch M1 Guide**: https://pytorch.org/blog/introducing-accelerated-pytorch-training-on-mac/

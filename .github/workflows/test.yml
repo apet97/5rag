@@ -13,7 +13,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest]  # Only Ubuntu for now (macOS has FAISS issues)
+        os: [ubuntu-latest, macos-14]  # macos-14 = M1 runners (ARM64)
         python-version: ["3.11"]  # Focus on 3.11 for speed
 
     steps:
@@ -49,6 +49,22 @@ jobs:
         BENCHMARK_FAKE_REMOTE: "1"
       run: |
         python benchmark.py --quick
+
+    - name: Run M1 compatibility tests (macOS only)
+      if: matrix.os == 'macos-14'
+      run: |
+        echo "Running M1-specific compatibility tests..."
+        bash scripts/m1_compatibility_test.sh
+        echo ""
+        echo "✅ M1 compatibility tests completed"
+
+    - name: Upload M1 test logs (macOS only)
+      if: matrix.os == 'macos-14'
+      uses: actions/upload-artifact@v3
+      with:
+        name: m1-compatibility-log
+        path: m1_compatibility.log
+      continue-on-error: true
 
     - name: Upload coverage reports to Codecov
       if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.11'

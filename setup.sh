@@ -90,6 +90,40 @@ info "Upgrading pip..."
 python -m pip install --upgrade pip -q
 success "pip upgraded"
 
+# Step 5.5: Check for M1 and recommend conda for FAISS compatibility
+MACHINE_ARCH=$(uname -m 2>/dev/null || echo "unknown")
+SYSTEM_OS=$(uname -s 2>/dev/null || echo "unknown")
+
+if [ "$SYSTEM_OS" = "Darwin" ] && [ "$MACHINE_ARCH" = "arm64" ]; then
+    echo ""
+    warning "Apple Silicon (M1/M2/M3) detected!"
+    echo ""
+    echo "  For best FAISS compatibility on M1 Macs, we recommend using conda instead of pip."
+    echo ""
+    echo "  Why conda?"
+    echo "    • FAISS ARM64 builds available via conda-forge"
+    echo "    • PyTorch with MPS acceleration"
+    echo "    • Better package compatibility on Apple Silicon"
+    echo ""
+    echo "  Quick conda setup:"
+    echo "    1. Install Miniforge: brew install miniforge"
+    echo "    2. Create environment: conda create -n rag_env python=3.11"
+    echo "    3. Activate: conda activate rag_env"
+    echo "    4. Install: see requirements-m1.txt for one-line command"
+    echo ""
+    echo "  See M1_COMPATIBILITY.md for detailed instructions."
+    echo ""
+    read -p "Continue with pip installation anyway? [y/N]: " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        info "Setup cancelled. Please use conda for M1 installation."
+        info "See requirements-m1.txt or M1_COMPATIBILITY.md for instructions."
+        exit 0
+    fi
+    warning "Continuing with pip... FAISS may fail to install on M1."
+    echo ""
+fi
+
 # Step 6: Install dependencies
 info "Installing dependencies (this may take a few minutes)..."
 if [ -f "requirements.lock" ]; then
