@@ -9,6 +9,8 @@ Tests the complete answer pipeline including:
 - Complete answer_once workflow
 """
 
+import json
+
 import pytest
 import numpy as np
 from unittest.mock import Mock, patch
@@ -177,7 +179,11 @@ class TestGenerateLLMAnswer:
     @patch('clockify_rag.answer.ask_llm')
     def test_generate_with_json_response(self, mock_ask_llm):
         """Test answer generation with JSON response."""
-        mock_ask_llm.return_value = '{"answer": "Track time using [1].", "confidence": 85}'
+        payload = {
+            "answer": "1. Track time using the timer.\n2. Steps:\n   - Press Start\n   - Press Stop\n3. Notes: Applies to all plans.\n4. Citations: [id_1]",
+            "confidence": 85,
+        }
+        mock_ask_llm.return_value = json.dumps(payload)
 
         answer, timing, confidence = generate_llm_answer(
             "How to track time?",
@@ -185,8 +191,8 @@ class TestGenerateLLMAnswer:
             packed_ids=[1]
         )
 
-        assert answer == "Track time using [1]."
-        assert confidence == 85
+        assert answer == payload["answer"]
+        assert confidence == payload["confidence"]
         assert timing >= 0
 
     @patch('clockify_rag.answer.ask_llm')
@@ -202,6 +208,24 @@ class TestGenerateLLMAnswer:
 
         assert answer == "Track time using [1]."
         assert confidence == 90
+
+    @patch('clockify_rag.answer.ask_llm')
+    def test_generate_with_numbered_answer_structure(self, mock_ask_llm):
+        """Ensure numbered content inside JSON answer parses correctly."""
+        payload = {
+            "answer": "1. Direct answer\n2. Steps:\n   1) Start timer\n   2) Stop timer\n3. Notes: Premium users see advanced features.\n4. Citations: [id_1, id_2]",
+            "confidence": 77,
+        }
+        mock_ask_llm.return_value = json.dumps(payload)
+
+        answer, _, confidence = generate_llm_answer(
+            "How to track time?",
+            "[1] Track time using timer. [2] Manual entry option.",
+            packed_ids=[1, 2]
+        )
+
+        assert answer == payload["answer"]
+        assert confidence == payload["confidence"]
 
     @patch('clockify_rag.answer.ask_llm')
     def test_generate_with_plain_text(self, mock_ask_llm):
