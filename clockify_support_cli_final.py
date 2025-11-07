@@ -125,9 +125,10 @@ from clockify_rag.exceptions import EmbeddingError, LLMError, IndexLoadError, Bu
 # All core configuration now imported from clockify_rag.config
 # Reference as: config.OLLAMA_URL, config.GEN_MODEL, etc.
 
-# CLI-specific file paths (not in package config)
+# CLI-specific file paths and flags (not in package config)
 BUILD_LOCK = ".build.lock"
 BUILD_LOCK_TTL_SEC = int(os.environ.get("BUILD_LOCK_TTL_SEC", "900"))  # Task D: 15 minutes default
+QUERY_LOG_DISABLED = False  # Can be set to True via --no-log flag
 
 # Note: Query expansion now handled by clockify_rag.retrieval.expand_query()
 
@@ -212,7 +213,7 @@ def get_session(retries=0):
 def http_post_with_retries(url, json_payload, retries=3, backoff=0.5, timeout=None):
     """POST with exponential backoff retry."""
     if timeout is None:
-        timeout = (EMB_CONNECT_T, EMB_READ_T)
+        timeout = (EMB_CONNECT_T, config.EMB_READ_T)
     s = get_session()
     last_error = None
     for attempt in range(retries):
@@ -301,10 +302,10 @@ def build_faiss_index(vecs: np.ndarray, nlist: int = 256, metric: str = "ip") ->
 
             # Seed FAISS k-means for deterministic training (Priority #4)
             # FAISS has internal randomness in k-means clustering that needs explicit seeding
-            faiss.seed(DEFAULT_SEED)
+            faiss.seed(config.DEFAULT_SEED)
 
             # Train on small subset to minimize segfault risk
-            rng = np.random.default_rng(DEFAULT_SEED)
+            rng = np.random.default_rng(config.DEFAULT_SEED)
             if len(vecs) >= m1_train_size:
                 train_indices = rng.choice(len(vecs), m1_train_size, replace=False)
                 train_vecs = vecs_f32[train_indices]
@@ -330,10 +331,10 @@ def build_faiss_index(vecs: np.ndarray, nlist: int = 256, metric: str = "ip") ->
 
         # Seed FAISS k-means for deterministic training (Priority #4)
         # FAISS has internal randomness in k-means clustering that needs explicit seeding
-        faiss.seed(DEFAULT_SEED)
+        faiss.seed(config.DEFAULT_SEED)
 
         # Train on sample to build centroids
-        rng = np.random.default_rng(DEFAULT_SEED)
+        rng = np.random.default_rng(config.DEFAULT_SEED)
         train_size = min(20000, len(vecs))
         train_indices = rng.choice(len(vecs), train_size, replace=False)
         train_vecs = vecs_f32[train_indices]
@@ -400,7 +401,7 @@ def hybrid_score(bm25_score: float, dense_score: float, alpha: float = 0.5) -> f
 def pack_snippets_dynamic(chunk_ids: list, chunks: dict, budget_tokens: int | None = None, target_util: float = 0.75) -> tuple:
     """Pack snippets with dynamic targeting. Returns (snippets, used_tokens, was_truncated)."""
     if budget_tokens is None:
-        budget_tokens = CTX_TOKEN_BUDGET
+        budget_tokens = config.CTX_TOKEN_BUDGET
     if not chunk_ids:
         return [], 0, False
 
@@ -444,8 +445,8 @@ def log_kpi(topk: int, packed: int, used_tokens: int, rerank_applied: bool, rera
         f"ask={KPI.ask_ms:.1f}ms "
         f"total={KPI.retrieve_ms + KPI.rerank_ms + KPI.ask_ms:.1f}ms "
         f"topk={topk} packed={packed} used_tokens={used_tokens} "
-        f"emb_backend={EMB_BACKEND} ann={USE_ANN} "
-        f"alpha={ALPHA_HYBRID} rerank_applied={rerank_applied}"
+        f"emb_backend={config.EMB_BACKEND} ann={config.USE_ANN} "
+        f"alpha={config.ALPHA_HYBRID} rerank_applied={rerank_applied}"
     )
     logger.info(f"kpi {kpi_line}")
 
@@ -470,9 +471,9 @@ def answer_to_json(answer: str, citations: list, used_tokens: int | None, topk: 
                 "used_tokens": budget_tokens,
                 "topk": topk,
                 "packed": packed,
-                "emb_backend": EMB_BACKEND,
-                "ann": USE_ANN,
-                "alpha": ALPHA_HYBRID
+                "emb_backend": config.EMB_BACKEND,
+                "ann": config.USE_ANN,
+                "alpha": config.ALPHA_HYBRID
             },
             "timing": {
                 "retrieve_ms": KPI.retrieve_ms,
@@ -641,35 +642,37 @@ def validate_ollama_url(url: str) -> str:
         raise ValueError(f"Invalid Ollama URL '{url}': {e}")
 
 def validate_and_set_config(ollama_url=None, gen_model=None, emb_model=None, ctx_budget=None):
-    """Validate and set global config from CLI args."""
-    global OLLAMA_URL, GEN_MODEL, EMB_MODEL, CTX_TOKEN_BUDGET
+    """Validate and set global config from CLI args.
 
+    Note: No 'global' declaration needed since we're modifying the imported
+    config module's attributes directly (config.OLLAMA_URL, etc.)
+    """
     if ollama_url:
-        OLLAMA_URL = validate_ollama_url(ollama_url)
-        logger.info(f"Ollama endpoint: {OLLAMA_URL}")
+        config.OLLAMA_URL = validate_ollama_url(ollama_url)
+        logger.info(f"Ollama endpoint: {config.OLLAMA_URL}")
 
     if gen_model:
-        GEN_MODEL = gen_model
-        logger.info(f"Generation model: {GEN_MODEL}")
+        config.GEN_MODEL = gen_model
+        logger.info(f"Generation model: {config.GEN_MODEL}")
 
     if emb_model:
-        EMB_MODEL = emb_model
-        logger.info(f"Embedding model: {EMB_MODEL}")
+        config.EMB_MODEL = emb_model
+        logger.info(f"Embedding model: {config.EMB_MODEL}")
 
     if ctx_budget:
         try:
-            CTX_TOKEN_BUDGET = int(ctx_budget)
-            if CTX_TOKEN_BUDGET < 256:
+            config.CTX_TOKEN_BUDGET = int(ctx_budget)
+            if config.CTX_TOKEN_BUDGET < 256:
                 raise ValueError("Context budget must be >= 256")
-            logger.info(f"Context token budget: {CTX_TOKEN_BUDGET}")
+            logger.info(f"Context token budget: {config.CTX_TOKEN_BUDGET}")
         except ValueError as e:
             raise ValueError(f"Invalid context budget: {e}")
 
 def validate_chunk_config():
     """Validate chunk parameters at startup."""
-    if CHUNK_OVERLAP >= CHUNK_CHARS:
-        raise ValueError(f"CHUNK_OVERLAP ({CHUNK_OVERLAP}) must be < CHUNK_CHARS ({CHUNK_CHARS})")
-    logger.debug(f"Chunk config: size={CHUNK_CHARS}, overlap={CHUNK_OVERLAP}")
+    if config.CHUNK_OVERLAP >= config.CHUNK_CHARS:
+        raise ValueError(f"config.CHUNK_OVERLAP ({config.CHUNK_OVERLAP}) must be < config.CHUNK_CHARS ({config.CHUNK_CHARS})")
+    logger.debug(f"Chunk config: size={config.CHUNK_CHARS}, overlap={config.CHUNK_OVERLAP}")
 
 def check_pytorch_mps():
     """Check PyTorch MPS availability on M1 Macs and log warnings (v4.1.2)."""
@@ -695,24 +698,24 @@ def check_pytorch_mps():
     except Exception as e:
         logger.debug(f"info: pytorch_mps check failed: {e}")
 
-def _log_config_summary(use_rerank=False, pack_top=DEFAULT_PACK_TOP, seed=DEFAULT_SEED, threshold=DEFAULT_THRESHOLD, top_k=DEFAULT_TOP_K, num_ctx=DEFAULT_NUM_CTX, num_predict=DEFAULT_NUM_PREDICT, retries=0):
+def _log_config_summary(use_rerank=False, pack_top=config.DEFAULT_PACK_TOP, seed=config.DEFAULT_SEED, threshold=config.DEFAULT_THRESHOLD, top_k=config.DEFAULT_TOP_K, num_ctx=config.DEFAULT_NUM_CTX, num_predict=config.DEFAULT_NUM_PREDICT, retries=config.DEFAULT_RETRIES):
     """Log configuration summary at startup - Task I."""
     proxy_trust = 1 if os.getenv("ALLOW_PROXIES") == "1" else 0
-    log_target = "off" if QUERY_LOG_DISABLED else pathlib.Path(QUERY_LOG_FILE).resolve()
+    log_target = "off" if config.LOG_QUERY_INCLUDE_ANSWER is False else pathlib.Path(config.QUERY_LOG_FILE).resolve()
     # Task I: Single-line CONFIG banner
     logger.info(
-        f"CONFIG model={GEN_MODEL} emb={EMB_MODEL} topk={top_k} pack={pack_top} thr={threshold} "
+        f"CONFIG model={config.GEN_MODEL} emb={config.EMB_MODEL} topk={top_k} pack={pack_top} thr={threshold} "
         f"seed={seed} ctx={num_ctx} pred={num_predict} retries={retries} "
-        f"timeouts=(3,{int(EMB_READ_T)}/{int(CHAT_READ_T)}/{int(RERANK_READ_T)}) "
+        f"timeouts=(3,{int(config.EMB_READ_T)}/{int(config.CHAT_READ_T)}/{int(config.RERANK_READ_T)}) "
         f"log={log_target} "
         f"trust_env={proxy_trust} rerank={1 if use_rerank else 0}"
     )
     # Task I: Print refusal string once for sanity
-    logger.info(f'REFUSAL_STR="{REFUSAL_STR}"')
+    logger.info(f'config.REFUSAL_STR="{config.REFUSAL_STR}"')
 
 # ====== SYSTEM PROMPT (Rank 25: Few-shot examples added) ======
 SYSTEM_PROMPT = f"""You are CAKE.com Internal Support for Clockify.
-Closed-book. Only use SNIPPETS. If info is missing, reply exactly "{REFUSAL_STR}" and set confidence to 0.
+Closed-book. Only use SNIPPETS. If info is missing, reply exactly "{config.REFUSAL_STR}" and set confidence to 0.
 Respond with a single JSON object that matches this schema:
 {{
   "answer": "<complete response>",
@@ -884,13 +887,13 @@ def count_tokens(text: str, model: str = None) -> int:
 
     Args:
         text: Text to count tokens for
-        model: Model name for tokenizer (defaults to GEN_MODEL)
+        model: Model name for tokenizer (defaults to config.GEN_MODEL)
 
     Returns:
         Accurate token count
     """
     if model is None:
-        model = GEN_MODEL
+        model = config.GEN_MODEL
 
     # Try tiktoken for GPT models
     if "gpt" in model.lower():
@@ -1041,7 +1044,7 @@ def split_by_headings(body: str):
     parts = re.split(r"\n(?=## +)", body)
     return [p.strip() for p in parts if p.strip()]
 
-def sliding_chunks(text: str, maxc=CHUNK_CHARS, overlap=CHUNK_OVERLAP):
+def sliding_chunks(text: str, maxc=config.CHUNK_CHARS, overlap=config.CHUNK_OVERLAP):
     """Overlapping chunks with sentence-aware splitting (Rank 23).
 
     Uses NLTK sentence tokenization to avoid breaking sentences mid-way.
@@ -1162,9 +1165,9 @@ def validate_ollama_embeddings(sample_text: str = "test") -> tuple:
     try:
         sess = get_session()
         r = sess.post(
-            f"{OLLAMA_URL}/api/embeddings",
-            json={"model": EMB_MODEL, "prompt": sample_text},  # Use "prompt" not "input"
-            timeout=(EMB_CONNECT_T, EMB_READ_T),
+            f"{config.OLLAMA_URL}/api/embeddings",
+            json={"model": config.EMB_MODEL, "prompt": sample_text},  # Use "prompt" not "input"
+            timeout=(EMB_CONNECT_T, config.EMB_READ_T),
             allow_redirects=False
         )
         r.raise_for_status()
@@ -1173,11 +1176,11 @@ def validate_ollama_embeddings(sample_text: str = "test") -> tuple:
         emb = resp_json.get("embedding", [])
 
         if not emb or len(emb) == 0:
-            logger.error(f"❌ Ollama {EMB_MODEL}: empty embedding returned (check API format)")
+            logger.error(f"❌ Ollama {config.EMB_MODEL}: empty embedding returned (check API format)")
             return 0, False
 
         dim = len(emb)
-        logger.info(f"✅ Ollama {EMB_MODEL}: {dim}-dim embeddings validated")
+        logger.info(f"✅ Ollama {config.EMB_MODEL}: {dim}-dim embeddings validated")
         return dim, True
     except Exception as e:
         logger.error(f"❌ Ollama validation failed: {e}")
@@ -1191,7 +1194,7 @@ def load_embedding_cache():
         dict: {content_hash: embedding_vector} mapping
     """
     cache = {}
-    cache_path = FILES["emb_cache"]
+    cache_path = config.FILES["emb_cache"]
     if os.path.exists(cache_path):
         logger.info(f"[INFO] Loading embedding cache from {cache_path}")
         try:
@@ -1212,7 +1215,7 @@ def save_embedding_cache(cache):
     Args:
         cache: dict of {content_hash: embedding_vector}
     """
-    cache_path = FILES["emb_cache"]
+    cache_path = config.FILES["emb_cache"]
     logger.info(f"[INFO] Saving {len(cache)} embeddings to cache")
     try:
         # Atomic write with temp file
@@ -1243,9 +1246,9 @@ def embed_texts(texts, retries=0):
         # Task G: use tuple timeouts
         try:
             r = sess.post(
-                f"{OLLAMA_URL}/api/embeddings",
-                json={"model": EMB_MODEL, "prompt": t},
-                timeout=(EMB_CONNECT_T, EMB_READ_T),
+                f"{config.OLLAMA_URL}/api/embeddings",
+                json={"model": config.EMB_MODEL, "prompt": t},
+                timeout=(EMB_CONNECT_T, config.EMB_READ_T),
                 allow_redirects=False
             )
             r.raise_for_status()
@@ -1260,7 +1263,7 @@ def embed_texts(texts, retries=0):
         except EmbeddingError:
             raise  # Re-raise our own errors as-is
         except (requests.exceptions.ConnectTimeout, requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
-            raise EmbeddingError(f"Embedding chunk {i} failed: {e} [hint: check OLLAMA_URL or increase EMB timeouts]") from e
+            raise EmbeddingError(f"Embedding chunk {i} failed: {e} [hint: check config.OLLAMA_URL or increase EMB timeouts]") from e
         except requests.exceptions.RequestException as e:
             raise EmbeddingError(f"Embedding chunk {i} request failed: {e}") from e
         except (KeyError, IndexError, TypeError) as e:  # SPECIFIC errors
@@ -1302,17 +1305,17 @@ def bm25_scores(query: str, bm, k1=None, b=None, top_k=None):
     Args:
         query: Query string
         bm: BM25 index dict with idf, avgdl, doc_lens, doc_tfs
-        k1: Term frequency saturation parameter (default: BM25_K1)
-        b: Length normalization parameter (default: BM25_B)
+        k1: Term frequency saturation parameter (default: config.BM25_K1)
+        b: Length normalization parameter (default: config.BM25_B)
         top_k: If specified, use early termination to compute only top-k scores (Wand-like pruning)
 
     Rank 24 optimization: When top_k is specified, uses score upper bounds to skip
     documents that cannot reach top-k threshold. Provides 2-3x speedup on large corpora.
     """
     if k1 is None:
-        k1 = BM25_K1
+        k1 = config.BM25_K1
     if b is None:
-        b = BM25_B
+        b = config.BM25_B
     q = tokenize(query)
     idf = bm["idf"]
     avgdl = bm["avgdl"]
@@ -1436,9 +1439,9 @@ def embed_query(question: str, retries=0) -> np.ndarray:
     # Task G: use tuple timeouts
     try:
         r = sess.post(
-            f"{OLLAMA_URL}/api/embeddings",
-            json={"model": EMB_MODEL, "prompt": question},
-            timeout=(EMB_CONNECT_T, EMB_READ_T),
+            f"{config.OLLAMA_URL}/api/embeddings",
+            json={"model": config.EMB_MODEL, "prompt": question},
+            timeout=(EMB_CONNECT_T, config.EMB_READ_T),
             allow_redirects=False
         )
         r.raise_for_status()
@@ -1446,7 +1449,7 @@ def embed_query(question: str, retries=0) -> np.ndarray:
         qv_norm = np.linalg.norm(qv)
         return qv / (qv_norm if qv_norm > 0 else 1.0)
     except (requests.exceptions.ConnectTimeout, requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
-        raise EmbeddingError(f"Query embedding failed: {e} [hint: check OLLAMA_URL or increase EMB timeouts]") from e
+        raise EmbeddingError(f"Query embedding failed: {e} [hint: check config.OLLAMA_URL or increase EMB timeouts]") from e
     except requests.exceptions.RequestException as e:
         raise EmbeddingError(f"Query embedding request failed: {e}") from e
     except Exception as e:
@@ -1509,7 +1512,7 @@ class DenseScoreStore:
 def retrieve(question: str, chunks, vecs_n, bm, top_k=12, hnsw=None, retries=0) -> tuple[list[int], dict[str, Any]]:
     """Hybrid retrieval: dense + BM25 + dedup. Optionally uses FAISS/HNSW for fast K-NN.
 
-    Scoring: hybrid = ALPHA_HYBRID * normalize(BM25) + (1 - ALPHA_HYBRID) * normalize(dense)
+    Scoring: hybrid = config.ALPHA_HYBRID * normalize(BM25) + (1 - config.ALPHA_HYBRID) * normalize(dense)
 
     Query expansion: Applies domain-specific synonym expansion for BM25 (keyword-based),
     uses original query for dense retrieval (embeddings already capture semantics).
@@ -1528,8 +1531,8 @@ def retrieve(question: str, chunks, vecs_n, bm, top_k=12, hnsw=None, retries=0) 
     qv_n = embed_query(question, retries=retries)
 
     # v4.1: Try to load FAISS index once on first call
-    if USE_ANN == "faiss" and _FAISS_INDEX is None:
-        _FAISS_INDEX = load_faiss_index(FILES["faiss_index"])
+    if config.USE_ANN == "faiss" and _FAISS_INDEX is None:
+        _FAISS_INDEX = load_faiss_index(config.FILES["faiss_index"])
         if _FAISS_INDEX:
             # Only set nprobe for IVF indexes (not flat indexes)
             if hasattr(_FAISS_INDEX, 'nprobe'):
@@ -1550,7 +1553,7 @@ def retrieve(question: str, chunks, vecs_n, bm, top_k=12, hnsw=None, retries=0) 
         # Rank 2: Only score FAISS candidates, don't compute full corpus (2-3x speedup)
         D, I = _FAISS_INDEX.search(
             qv_n.reshape(1, -1).astype("float32"),
-            max(ANN_CANDIDATE_MIN, top_k * FAISS_CANDIDATE_MULTIPLIER),
+            max(config.ANN_CANDIDATE_MIN, top_k * config.FAISS_CANDIDATE_MULTIPLIER),
         )
         candidate_idx = [int(i) for i in I[0] if 0 <= i < n_chunks]
         dense_from_ann = np.array([float(d) for d in D[0][: len(candidate_idx)]], dtype=np.float32)
@@ -1562,7 +1565,7 @@ def retrieve(question: str, chunks, vecs_n, bm, top_k=12, hnsw=None, retries=0) 
         dot_elapsed = 0.0  # No additional dot product needed
     # Fallback to HNSW if available
     elif hnsw:
-        _, cand = hnsw.knn_query(qv_n, k=max(ANN_CANDIDATE_MIN, top_k * FAISS_CANDIDATE_MULTIPLIER))
+        _, cand = hnsw.knn_query(qv_n, k=max(config.ANN_CANDIDATE_MIN, top_k * config.FAISS_CANDIDATE_MULTIPLIER))
         candidate_idx = cand[0].tolist()
         dot_start = time.perf_counter()
         dense_scores_full = vecs_n.dot(qv_n)
@@ -1580,7 +1583,7 @@ def retrieve(question: str, chunks, vecs_n, bm, top_k=12, hnsw=None, retries=0) 
     if not candidate_idx:
         # Rank 20: Limit fallback to top candidates instead of full corpus
         dense_scores_full = vecs_n.dot(qv_n)
-        max_candidates = max(ANN_CANDIDATE_MIN, top_k * FAISS_CANDIDATE_MULTIPLIER)
+        max_candidates = max(config.ANN_CANDIDATE_MIN, top_k * config.FAISS_CANDIDATE_MULTIPLIER)
         if len(chunks) > max_candidates:
             # Only keep top candidates, not entire corpus
             top_indices = np.argsort(dense_scores_full)[::-1][:max_candidates]
@@ -1606,8 +1609,8 @@ def retrieve(question: str, chunks, vecs_n, bm, top_k=12, hnsw=None, retries=0) 
         zs_dense = normalize_scores_zscore(dense_scores)
     zs_bm = zs_bm_full[candidate_idx_array] if candidate_idx_array.size else np.array([], dtype="float32")
 
-    # v4.1: Use configurable ALPHA_HYBRID for blending
-    hybrid = ALPHA_HYBRID * zs_bm + (1 - ALPHA_HYBRID) * zs_dense
+    # v4.1: Use configurable config.ALPHA_HYBRID for blending
+    hybrid = config.ALPHA_HYBRID * zs_bm + (1 - config.ALPHA_HYBRID) * zs_dense
     if hybrid.size:
         top_positions = np.argsort(hybrid)[::-1][:top_k]
         top_idx = candidate_idx_array[top_positions]
@@ -1625,7 +1628,7 @@ def retrieve(question: str, chunks, vecs_n, bm, top_k=12, hnsw=None, retries=0) 
 
     # Reuse cached normalized scores for full hybrid (already computed above)
     if zs_dense_full is not None:
-        hybrid_full = ALPHA_HYBRID * zs_bm_full + (1 - ALPHA_HYBRID) * zs_dense_full
+        hybrid_full = config.ALPHA_HYBRID * zs_bm_full + (1 - config.ALPHA_HYBRID) * zs_dense_full
     else:
         hybrid_full = np.zeros(len(chunks), dtype="float32")
         for idx, score in zip(candidate_idx, hybrid):
@@ -1669,7 +1672,7 @@ def retrieve(question: str, chunks, vecs_n, bm, top_k=12, hnsw=None, retries=0) 
         "hybrid": hybrid_full
     }
 
-def rerank_with_llm(question: str, chunks, selected, scores, seed=DEFAULT_SEED, num_ctx=DEFAULT_NUM_CTX, num_predict=DEFAULT_NUM_PREDICT, retries=0) -> tuple:
+def rerank_with_llm(question: str, chunks, selected, scores, seed=config.DEFAULT_SEED, num_ctx=config.DEFAULT_NUM_CTX, num_predict=config.DEFAULT_NUM_PREDICT, retries=0) -> tuple:
     """Optional: rerank MMR-selected passages with LLM - Task B.
 
     Returns: (order, scores, rerank_applied, rerank_reason)
@@ -1679,11 +1682,11 @@ def rerank_with_llm(question: str, chunks, selected, scores, seed=DEFAULT_SEED, 
 
     # Build passage list
     passages_text = "\n\n".join([
-        f"[id={chunks[i]['id']}]\n{chunks[i]['text'][:RERANK_SNIPPET_MAX_CHARS]}"
+        f"[id={chunks[i]['id']}]\n{chunks[i]['text'][:config.RERANK_SNIPPET_MAX_CHARS]}"
         for i in selected
     ])
     payload = {
-        "model": GEN_MODEL,
+        "model": config.GEN_MODEL,
         "options": {
             "temperature": 0,
             "seed": seed,
@@ -1704,9 +1707,9 @@ def rerank_with_llm(question: str, chunks, selected, scores, seed=DEFAULT_SEED, 
     try:
         # Task G: use tuple timeouts
         r = sess.post(
-            f"{OLLAMA_URL}/api/chat",
+            f"{config.OLLAMA_URL}/api/chat",
             json=payload,
-            timeout=(CHAT_CONNECT_T, RERANK_READ_T),
+            timeout=(CHAT_CONNECT_T, config.RERANK_READ_T),
             allow_redirects=False
         )
         r.raise_for_status()
@@ -1774,11 +1777,11 @@ def _fmt_snippet_header(chunk):
     return hdr
 
 # ====== PACKING ======
-def pack_snippets(chunks, order, pack_top=6, budget_tokens=CTX_TOKEN_BUDGET, num_ctx=DEFAULT_NUM_CTX):
+def pack_snippets(chunks, order, pack_top=6, budget_tokens=config.CTX_TOKEN_BUDGET, num_ctx=config.DEFAULT_NUM_CTX):
     """Pack snippets respecting strict token budget and hard snippet cap.
 
     Guarantees:
-    - Never exceeds min(CTX_TOKEN_BUDGET, num_ctx * 0.6)
+    - Never exceeds min(config.CTX_TOKEN_BUDGET, num_ctx * 0.6)
     - Respects model's actual context window via num_ctx
     - First item always included (truncate body if needed; mark [TRUNCATED])
     - Returns (block, ids, used_tokens)
@@ -1842,16 +1845,16 @@ def pack_snippets(chunks, order, pack_top=6, budget_tokens=CTX_TOKEN_BUDGET, num
 # ====== COVERAGE CHECK ======
 def coverage_ok(selected, dense_scores, threshold):
     """Check coverage."""
-    if len(selected) < COVERAGE_MIN_CHUNKS:
+    if len(selected) < config.COVERAGE_MIN_CHUNKS:
         return False
     highs = sum(1 for i in selected if dense_scores[i] >= threshold)
     return highs >= 2
 
 # ====== LLM CALL ======
-def ask_llm(question: str, snippets_block: str, seed=DEFAULT_SEED, num_ctx=DEFAULT_NUM_CTX, num_predict=DEFAULT_NUM_PREDICT, retries=0) -> str:
+def ask_llm(question: str, snippets_block: str, seed=config.DEFAULT_SEED, num_ctx=config.DEFAULT_NUM_CTX, num_predict=config.DEFAULT_NUM_PREDICT, retries=0) -> str:
     """Call Ollama chat with Qwen best-practice options - Task G."""
     payload = {
-        "model": GEN_MODEL,
+        "model": config.GEN_MODEL,
         "options": {
             "temperature": 0,
             "seed": seed,
@@ -1872,9 +1875,9 @@ def ask_llm(question: str, snippets_block: str, seed=DEFAULT_SEED, num_ctx=DEFAU
     # Task G: use tuple timeouts
     try:
         r = sess.post(
-            f"{OLLAMA_URL}/api/chat",
+            f"{config.OLLAMA_URL}/api/chat",
             json=payload,
-            timeout=(CHAT_CONNECT_T, CHAT_READ_T),
+            timeout=(CHAT_CONNECT_T, config.CHAT_READ_T),
             allow_redirects=False
         )
         r.raise_for_status()
@@ -1884,7 +1887,7 @@ def ask_llm(question: str, snippets_block: str, seed=DEFAULT_SEED, num_ctx=DEFAU
             return msg
         return j.get("response", "")
     except (requests.exceptions.ConnectTimeout, requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
-        raise LLMError(f"LLM call failed: {e} [hint: check OLLAMA_URL or increase CHAT timeouts]") from e
+        raise LLMError(f"LLM call failed: {e} [hint: check config.OLLAMA_URL or increase CHAT timeouts]") from e
     except requests.exceptions.RequestException as e:
         raise LLMError(f"LLM request failed: {e}") from e
     except Exception as e:
@@ -1908,9 +1911,9 @@ def build(md_path: str, retries=0):
         chunks = build_chunks(md_path)
         logger.info(f"  Created {len(chunks)} chunks")
         # Task E: Write chunks atomically
-        atomic_write_jsonl(FILES["chunks"], chunks)
+        atomic_write_jsonl(config.FILES["chunks"], chunks)
 
-        logger.info(f"\n[2/4] Embedding with {EMB_BACKEND}...")
+        logger.info(f"\n[2/4] Embedding with {config.EMB_BACKEND}...")
 
         # Load embedding cache for incremental builds
         emb_cache = load_embedding_cache()
@@ -1943,9 +1946,9 @@ def build(md_path: str, retries=0):
             texts_to_embed = [chunks[i]["text"] for i in cache_miss_indices]
             logger.info(f"  Computing {len(texts_to_embed)} new embeddings...")
 
-            if EMB_BACKEND == "local":
+            if config.EMB_BACKEND == "local":
                 # v4.1: Use local SentenceTransformer embeddings
-                logger.info(f"  Using local embeddings (backend={EMB_BACKEND})...")
+                logger.info(f"  Using local embeddings (backend={config.EMB_BACKEND})...")
                 new_embeddings = embed_local_batch(texts_to_embed, normalize=False)
             else:
                 # Fallback to remote Ollama embeddings
@@ -1975,7 +1978,7 @@ def build(md_path: str, retries=0):
         norms = np.linalg.norm(vecs, axis=1, keepdims=True)
         norms[norms == 0] = 1e-9
         vecs_n = (vecs / norms).astype("float32")
-        atomic_save_npy(vecs_n, FILES["emb"])  # Task E, H
+        atomic_save_npy(vecs_n, config.FILES["emb"])  # Task E, H
         logger.info(f"  Saved {vecs_n.shape} embeddings (normalized)")
         # Write metadata atomically
         meta_lines = [
@@ -1987,22 +1990,22 @@ def build(md_path: str, retries=0):
             }
             for c in chunks
         ]
-        atomic_write_jsonl(FILES["meta"], meta_lines)  # Task E
+        atomic_write_jsonl(config.FILES["meta"], meta_lines)  # Task E
 
         logger.info("\n[3/4] Building BM25 index...")
         bm = build_bm25(chunks)
         # Task E: use atomic_write_json for bm25.json
-        atomic_write_json(FILES["bm25"], bm)
+        atomic_write_json(config.FILES["bm25"], bm)
         logger.info(f"  Indexed {len(bm['idf'])} unique terms")
 
         # v4.1: Optional FAISS ANN index if enabled
-        if USE_ANN == "faiss":
+        if config.USE_ANN == "faiss":
             try:
                 logger.info("\n[3.1/4] Building FAISS ANN index...")
                 faiss_index = build_faiss_index(vecs_n, nlist=ANN_NLIST)
                 if faiss_index is not None:
-                    save_faiss_index(faiss_index, FILES["faiss_index"])
-                    logger.info(f"  Saved FAISS index to {FILES['faiss_index']}")
+                    save_faiss_index(faiss_index, config.FILES["faiss_index"])
+                    logger.info(f"  Saved FAISS index to {config.FILES['faiss_index']}")
                 else:
                     logger.info("  FAISS not available, skipping ANN index")
             except Exception as e:
@@ -2017,14 +2020,14 @@ def build(md_path: str, retries=0):
                 p.init_index(max_elements=vecs_n.shape[0], ef_construction=200, M=16)
                 p.add_items(vecs_n.astype("float32"), np.arange(vecs_n.shape[0]))
                 # Atomic save: write to temp file, fsync, then rename
-                temp_path = FILES["hnsw"] + ".tmp"
+                temp_path = config.FILES["hnsw"] + ".tmp"
                 p.save_index(temp_path)
                 # Ensure temp file hits disk before atomic replace
                 with open(temp_path, "rb") as _f:
                     os.fsync(_f.fileno())
-                os.replace(temp_path, FILES["hnsw"])  # Atomic on POSIX
-                _fsync_dir(FILES["hnsw"])
-                logger.info(f"  Saved HNSW index to {FILES['hnsw']}")
+                os.replace(temp_path, config.FILES["hnsw"])  # Atomic on POSIX
+                _fsync_dir(config.FILES["hnsw"])
+                logger.info(f"  Saved HNSW index to {config.FILES['hnsw']}")
             except ImportError:
                 logger.info("\n[3.5/4] HNSW requested but hnswlib not installed; skipping")
             except Exception as e:
@@ -2038,18 +2041,18 @@ def build(md_path: str, retries=0):
             "chunks": len(chunks),
             "emb_rows": int(vecs_n.shape[0]),
             "bm25_docs": len(bm["doc_lens"]),
-            "gen_model": GEN_MODEL,
-            "emb_model": EMB_MODEL if EMB_BACKEND == "ollama" else "all-MiniLM-L6-v2",
-            "emb_backend": EMB_BACKEND,
-            "ann": USE_ANN,
-            "mmr_lambda": MMR_LAMBDA,
-            "chunk_chars": CHUNK_CHARS,
-            "chunk_overlap": CHUNK_OVERLAP,
+            "gen_model": config.GEN_MODEL,
+            "emb_model": config.EMB_MODEL if config.EMB_BACKEND == "ollama" else "all-MiniLM-L6-v2",
+            "emb_backend": config.EMB_BACKEND,
+            "ann": config.USE_ANN,
+            "mmr_lambda": config.MMR_LAMBDA,
+            "chunk_chars": config.CHUNK_CHARS,
+            "chunk_overlap": config.CHUNK_OVERLAP,
             "built_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "code_version": "4.1"
         }
         # Task E: use atomic_write_json for index.meta.json
-        atomic_write_json(FILES["index_meta"], index_meta)
+        atomic_write_json(config.FILES["index_meta"], index_meta)
         logger.info(f"  Saved index metadata")
 
         # Invalidate global FAISS cache to force reload of new index
@@ -2069,18 +2072,18 @@ def load_index() -> tuple[list[dict], np.ndarray, dict, object] | None:
         Tuple of (chunks, vecs_n, bm, hnsw) or None if load fails.
     """
     # Check for metadata file
-    if not os.path.exists(FILES["index_meta"]):
+    if not os.path.exists(config.FILES["index_meta"]):
         logger.warning("[rebuild] index.meta.json missing: run 'python3 clockify_support_cli.py build knowledge_full.md'")
         return None
 
-    with open(FILES["index_meta"], encoding="utf-8") as f:
+    with open(config.FILES["index_meta"], encoding="utf-8") as f:
         meta = json.loads(f.read())
 
     # 1. Check all required artifacts exist
     missing = []
     for key in ["chunks", "emb", "bm25"]:
-        if not os.path.exists(FILES[key]):
-            missing.append(FILES[key])
+        if not os.path.exists(config.FILES[key]):
+            missing.append(config.FILES[key])
 
     if missing:
         logger.warning(f"[rebuild] Missing artifacts: {', '.join(missing)}")
@@ -2089,11 +2092,11 @@ def load_index() -> tuple[list[dict], np.ndarray, dict, object] | None:
 
     # 2. Load and validate embeddings (Task H: ensure float32)
     try:
-        vecs_n = np.load(FILES["emb"], mmap_mode="r")  # Read-only memmap
+        vecs_n = np.load(config.FILES["emb"], mmap_mode="r")  # Read-only memmap
         # Task H: force float32 dtype
         if vecs_n.dtype != np.float32:
             logger.warning(f"[rebuild] Embedding dtype mismatch: {vecs_n.dtype} (expected float32), converting...")
-            vecs_n = np.load(FILES["emb"]).astype("float32")
+            vecs_n = np.load(config.FILES["emb"]).astype("float32")
         expected_rows = meta.get("emb_rows", 0)
         if vecs_n.shape[0] != expected_rows:
             logger.warning(f"[rebuild] Embedding rows mismatch: {vecs_n.shape[0]} rows vs {expected_rows} in metadata")
@@ -2105,7 +2108,7 @@ def load_index() -> tuple[list[dict], np.ndarray, dict, object] | None:
 
     # 3. Load and validate chunks
     try:
-        with open(FILES["chunks"], encoding="utf-8") as f:
+        with open(config.FILES["chunks"], encoding="utf-8") as f:
             chunks = [json.loads(l) for l in f if l.strip()]
         if len(chunks) != meta.get("chunks", 0):
             logger.warning(f"[rebuild] Chunk count mismatch: {len(chunks)} chunks vs {meta.get('chunks')} in metadata")
@@ -2116,7 +2119,7 @@ def load_index() -> tuple[list[dict], np.ndarray, dict, object] | None:
 
     # 4. Load and validate BM25 index
     try:
-        with open(FILES["bm25"], encoding="utf-8") as f:
+        with open(config.FILES["bm25"], encoding="utf-8") as f:
             bm = json.loads(f.read())
         if len(bm["doc_lens"]) != meta.get("bm25_docs", 0):
             logger.warning(f"[rebuild] BM25 doc count mismatch: {len(bm['doc_lens'])} docs vs {meta.get('bm25_docs')} in metadata")
@@ -2127,9 +2130,9 @@ def load_index() -> tuple[list[dict], np.ndarray, dict, object] | None:
 
     # 4.5. Preload FAISS index if enabled (Quick Win #2)
     global _FAISS_INDEX
-    if USE_ANN == "faiss" and os.path.exists(FILES["faiss_index"]):
+    if config.USE_ANN == "faiss" and os.path.exists(config.FILES["faiss_index"]):
         try:
-            _FAISS_INDEX = load_faiss_index(FILES["faiss_index"])
+            _FAISS_INDEX = load_faiss_index(config.FILES["faiss_index"])
             if _FAISS_INDEX:
                 logger.info(f"✓ Preloaded FAISS index: nprobe={ANN_NPROBE}")
             else:
@@ -2158,12 +2161,12 @@ def load_index() -> tuple[list[dict], np.ndarray, dict, object] | None:
 
     # 6. Optional HNSW index (non-blocking if missing)
     hnsw = None
-    if os.getenv("USE_HNSWLIB") == "1" and os.path.exists(FILES["hnsw"]):
+    if os.getenv("USE_HNSWLIB") == "1" and os.path.exists(config.FILES["hnsw"]):
         try:
             import hnswlib
             hnsw = hnswlib.Index(space='cosine', dim=vecs_n.shape[1])
-            hnsw.load_index(FILES["hnsw"])
-            logger.debug(f"Loaded HNSW index from {FILES['hnsw']}")
+            hnsw.load_index(config.FILES["hnsw"])
+            logger.debug(f"Loaded HNSW index from {config.FILES['hnsw']}")
         except ImportError:
             logger.debug("hnswlib not installed; skipping HNSW")
         except Exception as e:
@@ -2270,7 +2273,7 @@ def log_query(query, answer, retrieved_chunks, latency_ms, refused=False, metada
         answer: Generated answer text
         retrieved_chunks: List of retrieved chunk dicts with scores
         latency_ms: Total query latency in milliseconds
-        refused: Whether answer was refused (returned REFUSAL_STR)
+        refused: Whether answer was refused (returned config.REFUSAL_STR)
         metadata: Optional dict with additional metadata (debug, backend, etc.)
     """
     # Early exit if logging is disabled (Rank 7: avoid needless work)
@@ -2386,7 +2389,7 @@ def apply_mmr_diversification(selected, scores, vecs_n, pack_top):
 
         while np.any(remaining_mask) and len(mmr_selected) < pack_top:
             # Compute MMR scores for remaining candidates
-            mmr_scores = MMR_LAMBDA * relevance_scores.copy()
+            mmr_scores = config.MMR_LAMBDA * relevance_scores.copy()
 
             if len(mmr_selected) > 0:  # Only apply diversity when we have prior selections
                 # Get vectors of all already-selected items
@@ -2399,7 +2402,7 @@ def apply_mmr_diversification(selected, scores, vecs_n, pack_top):
                 max_similarities = similarity_matrix.max(axis=1)
 
                 # Update MMR scores with diversity penalty
-                mmr_scores -= (1 - MMR_LAMBDA) * max_similarities
+                mmr_scores -= (1 - config.MMR_LAMBDA) * max_similarities
 
             # Mask out already-selected candidates
             mmr_scores[~remaining_mask] = -np.inf
@@ -2514,22 +2517,22 @@ def generate_llm_answer(question, context_block, seed, num_ctx, num_predict, ret
         # Check if answer contains citation markers
         if packed_ids is not None and len(packed_ids) > 0:
             has_citations = bool(extract_citations(answer))
-            if not has_citations and answer != REFUSAL_STR:
+            if not has_citations and answer != config.REFUSAL_STR:
                 if STRICT_CITATIONS:
                     logger.warning(f"[llm_fallback] Raw response lacks citations in strict mode, refusing answer")
-                    answer = REFUSAL_STR
+                    answer = config.REFUSAL_STR
                     confidence = None
                 else:
                     # No citations found in non-JSON response - potential policy violation
                     logger.warning(f"[llm_fallback] Raw response lacks citations, may violate policy")
 
     # Rank 9: Validate citations match packed chunks (only if not already refused)
-    if packed_ids is not None and answer != REFUSAL_STR:
+    if packed_ids is not None and answer != config.REFUSAL_STR:
         is_valid, valid_cits, invalid_cits = validate_citations(answer, packed_ids)
         if not is_valid and invalid_cits:
             if STRICT_CITATIONS:
                 logger.warning(f"[citation_validation] Invalid citations in strict mode: {invalid_cits}, refusing answer")
-                answer = REFUSAL_STR
+                answer = config.REFUSAL_STR
                 confidence = None
             else:
                 logger.warning(f"[citation_validation] Invalid citations: {invalid_cits} (valid: {packed_ids[:10]}...)")
@@ -2550,9 +2553,9 @@ def answer_once(
     use_rerank=False,
     debug=False,
     hnsw=None,
-    seed=DEFAULT_SEED,
-    num_ctx=DEFAULT_NUM_CTX,
-    num_predict=DEFAULT_NUM_PREDICT,
+    seed=config.DEFAULT_SEED,
+    num_ctx=config.DEFAULT_NUM_CTX,
+    num_predict=config.DEFAULT_NUM_PREDICT,
     retries=0
 ) -> tuple[str, dict]:
     """Answer a single question. Stateless. Returns (answer_text, metadata) - Task B, C, F.
@@ -2624,7 +2627,7 @@ def answer_once(
             refused=metadata.get("refused", False),
             metadata={
                 "debug": debug,
-                "backend": EMB_BACKEND,
+                "backend": config.EMB_BACKEND,
                 "cached": True,
                 "cache_age_seconds": cache_age,
             }
@@ -2668,7 +2671,7 @@ def answer_once(
         if not coverage_pass:
             if debug:
                 print(f"\n[DEBUG] Coverage failed: {len(mmr_selected)} selected, need ≥2 @ {threshold}")
-            logger.debug(f"[coverage_gate] REJECTED: seed={seed} model={GEN_MODEL} selected={len(mmr_selected)} threshold={threshold}")
+            logger.debug(f"[coverage_gate] REJECTED: seed={seed} model={config.GEN_MODEL} selected={len(mmr_selected)} threshold={threshold}")
 
             # Log refusal
             latency_ms = int((time.time() - turn_start) * 1000)
@@ -2712,22 +2715,22 @@ def answer_once(
 
             log_query(
                 query=question,
-                answer=REFUSAL_STR,
+                answer=config.REFUSAL_STR,
                 retrieved_chunks=refusal_chunks,
                 latency_ms=latency_ms,
                 refused=True,
-                metadata={"debug": debug, "backend": EMB_BACKEND, "coverage_pass": False}
+                metadata={"debug": debug, "backend": config.EMB_BACKEND, "coverage_pass": False}
             )
 
             # Cache refusal (Rank 14)
             refusal_metadata = {"selected": [], "refused": True, "cached": False, "cache_hit": False, "used_tokens": 0}
             refusal_metadata["timestamp"] = time.time()
-            QUERY_CACHE.put(question, REFUSAL_STR, refusal_metadata, params=cache_params)
+            QUERY_CACHE.put(question, config.REFUSAL_STR, refusal_metadata, params=cache_params)
 
-            return REFUSAL_STR, refusal_metadata
+            return config.REFUSAL_STR, refusal_metadata
 
         # Step 5: Pack with token budget and snippet cap (Task C)
-        block, ids, used_tokens = pack_snippets(chunks, mmr_selected, pack_top=pack_top, budget_tokens=CTX_TOKEN_BUDGET, num_ctx=num_ctx)
+        block, ids, used_tokens = pack_snippets(chunks, mmr_selected, pack_top=pack_top, budget_tokens=config.CTX_TOKEN_BUDGET, num_ctx=num_ctx)
 
         # Apply policy preamble for sensitive queries
         block = inject_policy_preamble(block, question)
@@ -2816,7 +2819,7 @@ def answer_once(
             refused=False,
             metadata={
                 "debug": debug,
-                "backend": EMB_BACKEND,
+                "backend": config.EMB_BACKEND,
                 "coverage_pass": True,
                 "rerank_applied": rerank_applied,
                 "rerank_reason": rerank_reason,  # Why rerank was/wasn't applied
@@ -2887,13 +2890,13 @@ def test_mmr_behavior_ok():
             "hybrid": hybrid_scores,
         }
 
-    def fake_rerank(question, chunks_, selected, scores, seed=DEFAULT_SEED, num_ctx=DEFAULT_NUM_CTX, num_predict=DEFAULT_NUM_PREDICT, retries=0):
+    def fake_rerank(question, chunks_, selected, scores, seed=config.DEFAULT_SEED, num_ctx=config.DEFAULT_NUM_CTX, num_predict=config.DEFAULT_NUM_PREDICT, retries=0):
         rerank_probe["mmr_selection"] = list(selected)
         # Keep original order but record deterministic scores
         rerank_scores = {idx: float(1.0 - 0.1 * pos) for pos, idx in enumerate(selected)}
         return list(selected), rerank_scores, True, ""
 
-    def fake_ask_llm(question, snippets_block, seed=DEFAULT_SEED, num_ctx=DEFAULT_NUM_CTX, num_predict=DEFAULT_NUM_PREDICT, retries=0):
+    def fake_ask_llm(question, snippets_block, seed=config.DEFAULT_SEED, num_ctx=config.DEFAULT_NUM_CTX, num_predict=config.DEFAULT_NUM_PREDICT, retries=0):
         return json.dumps({"answer": "stub", "confidence": 100})
 
     try:
@@ -3029,7 +3032,7 @@ def test_rerank_applied_when_enabled():
             "hybrid": hybrid_scores,
         }
 
-    def fake_rerank(question, chunks_, selected, scores, seed=DEFAULT_SEED, num_ctx=DEFAULT_NUM_CTX, num_predict=DEFAULT_NUM_PREDICT, retries=0):
+    def fake_rerank(question, chunks_, selected, scores, seed=config.DEFAULT_SEED, num_ctx=config.DEFAULT_NUM_CTX, num_predict=config.DEFAULT_NUM_PREDICT, retries=0):
         if "use" in question:
             calls["true"] += 1
         else:
@@ -3037,7 +3040,7 @@ def test_rerank_applied_when_enabled():
         rerank_scores = {idx: float(1.0 - 0.1 * pos) for pos, idx in enumerate(selected)}
         return list(reversed(selected)), rerank_scores, True, ""
 
-    def fake_ask_llm(question, snippets_block, seed=DEFAULT_SEED, num_ctx=DEFAULT_NUM_CTX, num_predict=DEFAULT_NUM_PREDICT, retries=0):
+    def fake_ask_llm(question, snippets_block, seed=config.DEFAULT_SEED, num_ctx=config.DEFAULT_NUM_CTX, num_predict=config.DEFAULT_NUM_PREDICT, retries=0):
         return json.dumps({"answer": question, "confidence": 90})
 
     try:
@@ -3128,7 +3131,7 @@ def ensure_index_ready(retries=0):
     """Ensure retrieval artifacts are present and return loaded index components."""
 
     artifacts_ok = True
-    for fname in [FILES["chunks"], FILES["emb"], FILES["meta"], FILES["bm25"], FILES["index_meta"]]:
+    for fname in [config.FILES["chunks"], config.FILES["emb"], config.FILES["meta"], config.FILES["bm25"], config.FILES["index_meta"]]:
         if not os.path.exists(fname):
             artifacts_ok = False
             break
@@ -3159,7 +3162,7 @@ def ensure_index_ready(retries=0):
 
 # ====== REPL ======
 
-def chat_repl(top_k=12, pack_top=6, threshold=0.30, use_rerank=False, debug=False, seed=DEFAULT_SEED, num_ctx=DEFAULT_NUM_CTX, num_predict=DEFAULT_NUM_PREDICT, retries=0, use_json=False):
+def chat_repl(top_k=12, pack_top=6, threshold=0.30, use_rerank=False, debug=False, seed=config.DEFAULT_SEED, num_ctx=config.DEFAULT_NUM_CTX, num_predict=config.DEFAULT_NUM_PREDICT, retries=0, use_json=False):
     """Stateless REPL loop - Task I. v4.1: JSON output support."""
     # Task I: log config summary at startup
     _log_config_summary(use_rerank=use_rerank, pack_top=pack_top, seed=seed, threshold=threshold, top_k=top_k, num_ctx=num_ctx, num_predict=num_predict, retries=retries)
@@ -3236,17 +3239,17 @@ def warmup_on_startup():
         embed_query("warmup", retries=1)
         # Warm-up LLM with trivial prompt
         payload = {
-            "model": GEN_MODEL,
+            "model": config.GEN_MODEL,
             "messages": [{"role": "user", "content": "hi"}],
             "stream": False,
             "max_tokens": 10
         }
         s = get_session()
         r = http_post_with_retries(
-            f"{OLLAMA_URL}/api/chat",
+            f"{config.OLLAMA_URL}/api/chat",
             payload,
             retries=1,
-            timeout=(CHAT_CONNECT_T, CHAT_READ_T)
+            timeout=(CHAT_CONNECT_T, config.CHAT_READ_T)
         )
         logger.info("info: warmup=done")
     except Exception as e:
@@ -3254,7 +3257,7 @@ def warmup_on_startup():
         error_msg = (
             f"⚠️  Warm-up failed: {type(e).__name__}: {str(e)[:200]}\n"
             f"   This may indicate Ollama is not running or models are not available.\n"
-            f"   Please check: ollama serve && ollama pull {EMB_MODEL} && ollama pull {GEN_MODEL}\n"
+            f"   Please check: ollama serve && ollama pull {config.EMB_MODEL} && ollama pull {config.GEN_MODEL}\n"
             f"   Continuing without warm-up (first query may be slower)..."
         )
         logger.error(error_msg)
@@ -3264,7 +3267,8 @@ def warmup_on_startup():
 # ====== MAIN ======
 def main():
     # v4.1: Declare globals at function start (Section 7)
-    global EMB_BACKEND, USE_ANN, ALPHA_HYBRID, QUERY_LOG_DISABLED, FAISS_CANDIDATE_MULTIPLIER
+    # Note: Most config now in clockify_rag.config module (no global declaration needed)
+    global QUERY_LOG_DISABLED
 
     ap = argparse.ArgumentParser(
         prog="clockify_support_cli",
@@ -3277,11 +3281,11 @@ def main():
     ap.add_argument("--no-log", action="store_true",
                     help="Disable query log file writes (privacy mode)")
     ap.add_argument("--ollama-url", type=str, default=None,
-                    help="Ollama endpoint (default from OLLAMA_URL env or http://127.0.0.1:11434)")
+                    help="Ollama endpoint (default from config.OLLAMA_URL env or http://127.0.0.1:11434)")
     ap.add_argument("--gen-model", type=str, default=None,
-                    help="Generation model name (default from GEN_MODEL env or qwen2.5:32b)")
+                    help="Generation model name (default from config.GEN_MODEL env or qwen2.5:32b)")
     ap.add_argument("--emb-model", type=str, default=None,
-                    help="Embedding model name (default from EMB_MODEL env or nomic-embed-text)")
+                    help="Embedding model name (default from config.EMB_MODEL env or nomic-embed-text)")
     ap.add_argument("--ctx-budget", type=int, default=None,
                     help="Context token budget (default from CTX_BUDGET env or 2800)")
     ap.add_argument("--query-expansions", type=str, default=None,
@@ -3293,35 +3297,35 @@ def main():
     b.add_argument("md_path", help="Path to knowledge_full.md")
     b.add_argument("--retries", type=int, default=DEFAULT_RETRIES, help="Retries for transient errors (default 0)")
     # v4.1: Add flags to build subparser for explicit control
-    b.add_argument("--emb-backend", choices=["local", "ollama"], default=EMB_BACKEND,
+    b.add_argument("--emb-backend", choices=["local", "ollama"], default=config.EMB_BACKEND,
                    help="Embedding backend: local (SentenceTransformer) or ollama (default local)")
-    b.add_argument("--ann", choices=["faiss", "none"], default=USE_ANN,
+    b.add_argument("--ann", choices=["faiss", "none"], default=config.USE_ANN,
                    help="ANN index: faiss (IVFFlat) or none (full-scan, default faiss)")
-    b.add_argument("--alpha", type=float, default=ALPHA_HYBRID,
+    b.add_argument("--alpha", type=float, default=config.ALPHA_HYBRID,
                    help="Hybrid scoring blend: alpha*BM25 + (1-alpha)*dense (default 0.5)")
 
     c = subparsers.add_parser("chat", help="Start REPL")
     c.add_argument("--debug", action="store_true", help="Print retrieval diagnostics")
     c.add_argument("--rerank", action="store_true", help="Enable LLM-based reranking")
-    c.add_argument("--topk", type=int, default=DEFAULT_TOP_K, help="Top-K candidates (default 12)")
-    c.add_argument("--pack", type=int, default=DEFAULT_PACK_TOP, help="Snippets to pack (default 6)")
-    c.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD, help="Cosine threshold (default 0.30)")
-    c.add_argument("--seed", type=int, default=DEFAULT_SEED, help="Random seed for LLM (default 42)")
-    c.add_argument("--num-ctx", type=int, default=DEFAULT_NUM_CTX, help="LLM context window (default 8192)")
-    c.add_argument("--num-predict", type=int, default=DEFAULT_NUM_PREDICT, help="LLM max generation tokens (default 512)")
+    c.add_argument("--topk", type=int, default=config.DEFAULT_TOP_K, help="Top-K candidates (default 12)")
+    c.add_argument("--pack", type=int, default=config.DEFAULT_PACK_TOP, help="Snippets to pack (default 6)")
+    c.add_argument("--threshold", type=float, default=config.DEFAULT_THRESHOLD, help="Cosine threshold (default 0.30)")
+    c.add_argument("--seed", type=int, default=config.DEFAULT_SEED, help="Random seed for LLM (default 42)")
+    c.add_argument("--num-ctx", type=int, default=config.DEFAULT_NUM_CTX, help="LLM context window (default 8192)")
+    c.add_argument("--num-predict", type=int, default=config.DEFAULT_NUM_PREDICT, help="LLM max generation tokens (default 512)")
     c.add_argument("--retries", type=int, default=DEFAULT_RETRIES, help="Retries for transient errors (default 0)")
     # Task A: determinism check flags
     c.add_argument("--det-check", action="store_true", help="Determinism check: ask same Q twice, compare hashes")
     # v4.1: Add flags to chat subparser for explicit control
-    c.add_argument("--emb-backend", choices=["local", "ollama"], default=EMB_BACKEND,
+    c.add_argument("--emb-backend", choices=["local", "ollama"], default=config.EMB_BACKEND,
                    help="Embedding backend: local (SentenceTransformer) or ollama (default local)")
-    c.add_argument("--ann", choices=["faiss", "none"], default=USE_ANN,
+    c.add_argument("--ann", choices=["faiss", "none"], default=config.USE_ANN,
                    help="ANN index: faiss (IVFFlat) or none (full-scan, default faiss)")
-    c.add_argument("--alpha", type=float, default=ALPHA_HYBRID,
+    c.add_argument("--alpha", type=float, default=config.ALPHA_HYBRID,
                    help="Hybrid scoring blend: alpha*BM25 + (1-alpha)*dense (default 0.5)")
     c.add_argument("--no-expand", action="store_true",
                    help="Disable query expansion (synonym substitution)")
-    c.add_argument("--faiss-multiplier", type=int, default=FAISS_CANDIDATE_MULTIPLIER,
+    c.add_argument("--faiss-multiplier", type=int, default=config.FAISS_CANDIDATE_MULTIPLIER,
                    help="FAISS candidate multiplier: retrieve top_k * N for reranking (default 3)")
     c.add_argument("--json", action="store_true", help="Output answer as JSON with metrics (v4.1)")
 
@@ -3329,31 +3333,31 @@ def main():
     a.add_argument("question", help="Question to answer")
     a.add_argument("--debug", action="store_true", help="Print retrieval diagnostics")
     a.add_argument("--rerank", action="store_true", help="Enable LLM-based reranking")
-    a.add_argument("--topk", type=int, default=DEFAULT_TOP_K, help="Top-K candidates (default 12)")
-    a.add_argument("--pack", type=int, default=DEFAULT_PACK_TOP, help="Snippets to pack (default 6)")
-    a.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD, help="Cosine threshold (default 0.30)")
-    a.add_argument("--seed", type=int, default=DEFAULT_SEED, help="Random seed for LLM (default 42)")
-    a.add_argument("--num-ctx", type=int, default=DEFAULT_NUM_CTX, help="LLM context window (default 8192)")
-    a.add_argument("--num-predict", type=int, default=DEFAULT_NUM_PREDICT, help="LLM max generation tokens (default 512)")
+    a.add_argument("--topk", type=int, default=config.DEFAULT_TOP_K, help="Top-K candidates (default 12)")
+    a.add_argument("--pack", type=int, default=config.DEFAULT_PACK_TOP, help="Snippets to pack (default 6)")
+    a.add_argument("--threshold", type=float, default=config.DEFAULT_THRESHOLD, help="Cosine threshold (default 0.30)")
+    a.add_argument("--seed", type=int, default=config.DEFAULT_SEED, help="Random seed for LLM (default 42)")
+    a.add_argument("--num-ctx", type=int, default=config.DEFAULT_NUM_CTX, help="LLM context window (default 8192)")
+    a.add_argument("--num-predict", type=int, default=config.DEFAULT_NUM_PREDICT, help="LLM max generation tokens (default 512)")
     a.add_argument("--retries", type=int, default=DEFAULT_RETRIES, help="Retries for transient errors (default 0)")
-    a.add_argument("--emb-backend", choices=["local", "ollama"], default=EMB_BACKEND,
+    a.add_argument("--emb-backend", choices=["local", "ollama"], default=config.EMB_BACKEND,
                    help="Embedding backend: local (SentenceTransformer) or ollama (default local)")
-    a.add_argument("--ann", choices=["faiss", "none"], default=USE_ANN,
+    a.add_argument("--ann", choices=["faiss", "none"], default=config.USE_ANN,
                    help="ANN index: faiss (IVFFlat) or none (full-scan, default faiss)")
-    a.add_argument("--alpha", type=float, default=ALPHA_HYBRID,
+    a.add_argument("--alpha", type=float, default=config.ALPHA_HYBRID,
                    help="Hybrid scoring blend: alpha*BM25 + (1-alpha)*dense (default 0.5)")
     a.add_argument("--no-expand", action="store_true",
                    help="Disable query expansion (synonym substitution)")
-    a.add_argument("--faiss-multiplier", type=int, default=FAISS_CANDIDATE_MULTIPLIER,
+    a.add_argument("--faiss-multiplier", type=int, default=config.FAISS_CANDIDATE_MULTIPLIER,
                    help="FAISS candidate multiplier: retrieve top_k * N for reranking (default 3)")
     a.add_argument("--json", action="store_true", help="Output answer as JSON with metrics (v4.1)")
 
     # v4.1: Ollama optimization flags (Section 7)
-    ap.add_argument("--emb-backend", choices=["local", "ollama"], default=EMB_BACKEND,
+    ap.add_argument("--emb-backend", choices=["local", "ollama"], default=config.EMB_BACKEND,
                    help="Embedding backend: local (SentenceTransformer) or ollama (default local)")
-    ap.add_argument("--ann", choices=["faiss", "none"], default=USE_ANN,
+    ap.add_argument("--ann", choices=["faiss", "none"], default=config.USE_ANN,
                    help="ANN index: faiss (IVFFlat) or none (full-scan, default faiss)")
-    ap.add_argument("--alpha", type=float, default=ALPHA_HYBRID,
+    ap.add_argument("--alpha", type=float, default=config.ALPHA_HYBRID,
                    help="Hybrid scoring blend: alpha*BM25 + (1-alpha)*dense (default 0.5)")
     ap.add_argument("--selftest", action="store_true", help="Run self-tests and exit (v4.1)")
     ap.add_argument("--json", action="store_true", help="Output answer as JSON with metrics (v4.1)")
@@ -3382,13 +3386,13 @@ def main():
         QUERY_LOG_DISABLED = True
 
     # v4.1: Update globals from CLI args (Section 7)
-    EMB_BACKEND = args.emb_backend
-    USE_ANN = args.ann
-    ALPHA_HYBRID = args.alpha
+    config.EMB_BACKEND = args.emb_backend
+    config.USE_ANN = args.ann
+    config.ALPHA_HYBRID = args.alpha
 
     # Update FAISS multiplier if provided in subcommand args
     if hasattr(args, "faiss_multiplier"):
-        FAISS_CANDIDATE_MULTIPLIER = args.faiss_multiplier
+        config.FAISS_CANDIDATE_MULTIPLIER = args.faiss_multiplier
 
     # v4.1: Run selftest if requested (Section 8)
     if getattr(args, "selftest", False):
@@ -3467,7 +3471,7 @@ def main():
         # Task A: Determinism check
         if getattr(args, "det_check", False):
             # Load index once for determinism test
-            for fname in [FILES["chunks"], FILES["emb"], FILES["meta"], FILES["bm25"], FILES["index_meta"]]:
+            for fname in [config.FILES["chunks"], config.FILES["emb"], config.FILES["meta"], config.FILES["bm25"], config.FILES["index_meta"]]:
                 if not os.path.exists(fname):
                     logger.info("[rebuild] artifacts missing for det-check: building...")
                     if os.path.exists("knowledge_full.md"):
@@ -3480,15 +3484,15 @@ def main():
                     seed = 42
                     np.random.seed(seed)
                     prompt = "What is Clockify?"
-                    payload = {"model": GEN_MODEL, "prompt": prompt, "options": {"seed": seed}}
+                    payload = {"model": config.GEN_MODEL, "prompt": prompt, "options": {"seed": seed}}
 
-                    r1 = http_post_with_retries(f"{OLLAMA_URL}/api/generate", payload,
-                                                retries=2, timeout=(CHAT_CONNECT_T, CHAT_READ_T))
+                    r1 = http_post_with_retries(f"{config.OLLAMA_URL}/api/generate", payload,
+                                                retries=2, timeout=(CHAT_CONNECT_T, config.CHAT_READ_T))
                     ans1 = r1.json().get("response", "")
 
                     np.random.seed(seed)
-                    r2 = http_post_with_retries(f"{OLLAMA_URL}/api/generate", payload,
-                                                retries=2, timeout=(CHAT_CONNECT_T, CHAT_READ_T))
+                    r2 = http_post_with_retries(f"{config.OLLAMA_URL}/api/generate", payload,
+                                                retries=2, timeout=(CHAT_CONNECT_T, config.CHAT_READ_T))
                     ans2 = r2.json().get("response", "")
 
                     h1 = hashlib.md5(ans1.encode()).hexdigest()[:16]
