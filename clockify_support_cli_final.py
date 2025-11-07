@@ -2870,6 +2870,37 @@ def answer_once(
             metadata["timestamp"] = timestamp
         cache_age = time.time() - timestamp
         logger.info(f"[cache] HIT question_len={len(question)} cache_age={cache_age:.1f}s")
+
+        # Priority #8: Log cached queries with answer redaction honored
+        # Reconstruct retrieved_chunks from cached metadata for logging
+        selected_ids = metadata.get("selected", [])
+        cached_log_chunks = []
+        for chunk_id in selected_ids:
+            cached_log_chunks.append({
+                "id": chunk_id,
+                "dense": 0.0,  # Scores not preserved in cache metadata
+                "bm25": 0.0,
+                "hybrid": 0.0,
+            })
+
+        # Compute cache hit latency (minimal)
+        cache_hit_latency = (time.time() - timestamp) * 1000  # ms
+
+        # Log with answer redaction respected
+        log_query(
+            query=question,
+            answer=answer,
+            retrieved_chunks=cached_log_chunks,
+            latency_ms=cache_hit_latency,
+            refused=metadata.get("refused", False),
+            metadata={
+                "debug": debug,
+                "backend": EMB_BACKEND,
+                "cached": True,
+                "cache_age_seconds": cache_age,
+            }
+        )
+
         return answer, metadata
 
     turn_start = time.time()
@@ -3489,7 +3520,16 @@ def warmup_on_startup():
         )
         logger.info("info: warmup=done")
     except Exception as e:
-        logger.warning(f"warmup failed: {e}")
+        # Priority #15: Report warm-up failures clearly (not just silent warning)
+        error_msg = (
+            f"⚠️  Warm-up failed: {type(e).__name__}: {str(e)[:200]}\n"
+            f"   This may indicate Ollama is not running or models are not available.\n"
+            f"   Please check: ollama serve && ollama pull {EMB_MODEL} && ollama pull {GEN_MODEL}\n"
+            f"   Continuing without warm-up (first query may be slower)..."
+        )
+        logger.error(error_msg)
+        # Also print to stderr for visibility in interactive mode
+        print(error_msg, file=sys.stderr)
 
 # ====== MAIN ======
 def main():
