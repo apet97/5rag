@@ -3021,7 +3021,7 @@ def answer_once(
                 "bm25": info["bm25"],
                 "hybrid": info["hybrid"],
             }
-            if LOG_QUERY_INCLUDE_ANSWER:
+            if LOG_QUERY_INCLUDE_CHUNKS:
                 entry["chunk"] = chunk
             mmr_rank = mmr_rank_by_id.get(chunk_id)
             if mmr_rank is not None:
@@ -3042,6 +3042,8 @@ def answer_once(
                 "backend": EMB_BACKEND,
                 "coverage_pass": True,
                 "rerank_applied": rerank_applied,
+                "rerank_reason": rerank_reason,  # Why rerank was/wasn't applied
+                "rerank_candidates": len(mmr_selected) if use_rerank else 0,  # Candidates sent to reranker
                 "num_selected": len(mmr_selected),
                 "num_packed": len(ids),
                 "used_tokens": used_tokens,
