@@ -4,7 +4,7 @@ import hashlib
 import json
 import logging
 import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 
 import numpy as np
 import requests
@@ -159,27 +159,54 @@ def embed_texts(texts: list, retries=0) -> np.ndarray:
         return np.array(vecs, dtype="float32")
 
     # Parallel batching mode (Rank 10 optimization)
+    # Priority #7: Cap outstanding futures to prevent socket exhaustion
     logger.info(f"[Rank 10] Embedding {total} texts with {EMB_MAX_WORKERS} workers")
     results = [None] * total  # Pre-allocate to maintain order
     completed = 0
 
+    # Priority #7: Limit outstanding futures to max_workers * EMB_BATCH_SIZE
+    # This prevents memory exhaustion and socket exhaustion on large corpora
+    max_outstanding = EMB_MAX_WORKERS * EMB_BATCH_SIZE
+    logger.debug(f"[Priority #7] Capping outstanding futures at {max_outstanding}")
+
     try:
         with ThreadPoolExecutor(max_workers=EMB_MAX_WORKERS) as executor:
-            # Submit all embedding tasks (Rank 5 fix: pass retries instead of shared session)
-            futures = {
-                executor.submit(_embed_single_text, i, text, retries, total): i
-                for i, text in enumerate(texts)
-            }
+            # Priority #7: Use sliding window approach instead of submitting all at once
+            # Submit initial batch
+            pending_futures = {}
+            text_iter = enumerate(texts)
 
-            # Collect results as they complete
-            for future in as_completed(futures):
-                idx, emb = future.result()  # Will raise if _embed_single_text raised
-                results[idx] = emb
-                completed += 1
+            # Submit initial batch up to max_outstanding
+            for i, text in text_iter:
+                if len(pending_futures) >= max_outstanding:
+                    break
+                future = executor.submit(_embed_single_text, i, text, retries, total)
+                pending_futures[future] = i
 
-                # Log progress every 100 completions
-                if completed % 100 == 0 or completed == total:
-                    logger.info(f"  [{completed}/{total}]")
+            # Process completions and submit new tasks as slots open
+            while pending_futures:
+                # Wait for at least one future to complete
+                done, _ = wait(pending_futures.keys(), return_when=FIRST_COMPLETED)
+
+                for future in done:
+                    idx = pending_futures.pop(future)
+                    idx_result, emb = future.result()  # Will raise if _embed_single_text raised
+                    results[idx_result] = emb
+                    completed += 1
+
+                    # Log progress every 100 completions
+                    if completed % 100 == 0 or completed == total:
+                        logger.info(f"  [{completed}/{total}]")
+
+                # Submit new tasks to fill slots (up to max_outstanding)
+                while len(pending_futures) < max_outstanding:
+                    try:
+                        i, text = next(text_iter)
+                        future = executor.submit(_embed_single_text, i, text, retries, total)
+                        pending_futures[future] = i
+                    except StopIteration:
+                        # No more texts to process
+                        break
 
     except Exception as e:
         # If batching fails, log and re-raise
