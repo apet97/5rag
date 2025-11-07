@@ -176,9 +176,11 @@ def embed_texts(texts: list, retries=0) -> np.ndarray:
             pending_futures = {}
             text_iter = enumerate(texts)
 
-            # Submit initial batch up to max_outstanding
-            for i, text in text_iter:
-                if len(pending_futures) >= max_outstanding:
+            # Submit initial batch up to max_outstanding without dropping the item
+            while len(pending_futures) < max_outstanding:
+                try:
+                    i, text = next(text_iter)
+                except StopIteration:
                     break
                 future = executor.submit(_embed_single_text, i, text, retries, total)
                 pending_futures[future] = i
