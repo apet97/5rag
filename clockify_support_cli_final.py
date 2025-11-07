@@ -1049,7 +1049,8 @@ def count_tokens(text: str, model: str = None) -> int:
         non_cjk_chars = len(text) - cjk_chars
 
         # CJK: ~1.5 chars/token, non-CJK: ~3.5 chars/token
-        return int(cjk_chars / 1.5 + non_cjk_chars / 3.5)
+        # Use ceil to ensure we never underestimate (safer for budget enforcement)
+        return math.ceil(cjk_chars / 1.5 + non_cjk_chars / 3.5)
 
     # Default fallback
     return approx_tokens(len(text))
