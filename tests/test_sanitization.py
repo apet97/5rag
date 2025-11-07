@@ -52,7 +52,7 @@ class TestSanitization:
     def test_sanitize_control_characters_raise(self):
         """Test that control characters raise ValueError."""
         question = "Hello\x00World"  # Null byte
-        with pytest.raises(ValueError, match="null"):
+        with pytest.raises(ValueError, match="control"):
             sanitize_question(question)
 
         question = "Hello\x01World"  # Control character
