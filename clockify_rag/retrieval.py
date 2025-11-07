@@ -49,6 +49,7 @@ from .config import (
     ANN_NPROBE,
     USE_ANN,
 )
+from .embedding import embed_query as _embedding_embed_query
 from .exceptions import EmbeddingError, LLMError
 from .http_utils import get_session
 from .indexing import bm25_scores, load_faiss_index
@@ -310,26 +311,15 @@ def normalize_scores_zscore(arr: np.ndarray) -> np.ndarray:
 
 
 def embed_query(question: str, retries=0) -> np.ndarray:
-    """Embed a query. Returns normalized query vector."""
-    sess = get_session(retries=retries)
+    """Embed a query using the configured backend.
 
-    try:
-        r = sess.post(
-            f"{OLLAMA_URL}/api/embeddings",
-            json={"model": EMB_MODEL, "prompt": question},
-            timeout=(EMB_CONNECT_T, EMB_READ_T),
-            allow_redirects=False
-        )
-        r.raise_for_status()
-        qv = np.array(r.json()["embedding"], dtype="float32")
-        qv_norm = np.linalg.norm(qv)
-        return qv / (qv_norm if qv_norm > 0 else 1.0)
-    except (requests.exceptions.ConnectTimeout, requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
-        raise EmbeddingError(f"Query embedding failed: {e} [hint: check OLLAMA_URL or increase EMB timeouts]") from e
-    except requests.exceptions.RequestException as e:
-        raise EmbeddingError(f"Query embedding request failed: {e}") from e
-    except Exception as e:
-        raise EmbeddingError(f"Query embedding failed: {e}") from e
+    Delegates to :mod:`clockify_rag.embedding` so the query vector shares the
+    same dimensionality and normalization strategy as stored document
+    embeddings, regardless of whether the backend is Ollama or the local
+    SentenceTransformer.
+    """
+
+    return _embedding_embed_query(question, retries=retries)
 
 
 class DenseScoreStore:

@@ -28,6 +28,54 @@ requires_ollama = pytest.mark.skipif(
 )
 
 
+def test_retrieve_local_backend(monkeypatch, sample_chunks, sample_embeddings, sample_bm25):
+    """Ensure retrieval works with the local embedding backend without Ollama."""
+
+    import clockify_rag.config as config
+    import clockify_rag.embedding as embedding
+    import clockify_rag.retrieval as retrieval
+
+    # Force local backend across modules
+    monkeypatch.setattr(config, "EMB_BACKEND", "local", raising=False)
+    monkeypatch.setattr(embedding, "EMB_BACKEND", "local", raising=False)
+    monkeypatch.setattr(retrieval, "EMB_BACKEND", "local", raising=False)
+    monkeypatch.setattr(retrieval, "_FAISS_INDEX", None, raising=False)
+    monkeypatch.setattr(retrieval, "USE_ANN", "none", raising=False)
+
+    fake_vec = np.ones((1, embedding.EMB_DIM), dtype=np.float32)
+    fake_vec = fake_vec / np.linalg.norm(fake_vec, axis=1, keepdims=True)
+
+    calls = {"count": 0}
+
+    def fake_embed_local_batch(texts, normalize=True):
+        calls["count"] += 1
+        assert texts == ["How do I track time?"]
+        assert normalize is True
+        return fake_vec
+
+    def fail_embed_texts(*_args, **_kwargs):
+        raise AssertionError("embed_texts should not be called for local backend")
+
+    monkeypatch.setattr(embedding, "embed_local_batch", fake_embed_local_batch)
+    monkeypatch.setattr(embedding, "embed_texts", fail_embed_texts)
+
+    question = "How do I track time?"
+    selected, scores = retrieval.retrieve(
+        question,
+        sample_chunks,
+        sample_embeddings,
+        sample_bm25,
+        top_k=2,
+        faiss_index_path=None,
+    )
+
+    assert calls["count"] == 1, "Local embedding path should be used exactly once"
+    assert selected, "Should return at least one chunk"
+    assert max(selected) < len(sample_chunks)
+    assert set(scores.keys()) == {"dense", "bm25", "hybrid"}
+    assert isinstance(scores["dense"], retrieval.DenseScoreStore)
+
+
 @requires_ollama
 def test_retrieve_returns_correct_top_k(sample_chunks, sample_embeddings, sample_bm25):
     """Verify retrieval returns exactly top_k results."""
