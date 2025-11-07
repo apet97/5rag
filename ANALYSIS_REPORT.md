@@ -1,195 +1,636 @@
 # Comprehensive RAG Tool Analysis
 
 ## Executive Summary
-- **Overall assessment:** ★★★☆☆ (3/5)
-- **Top strengths:**
-  1. Feature-rich hybrid retrieval pipeline with BM25, dense vectors, MMR, optional reranking, and detailed telemetry. 【F:clockify_support_cli_final.py†L1400-L1788】【F:clockify_support_cli_final.py†L2773-L3042】
-  2. Deep supporting tooling (benchmarks, evaluation harness, dummy index generator) that enables local validation without heavy dependencies. 【F:benchmark.py†L1-L176】【F:scripts/create_dummy_index.py†L1-L97】【F:eval.py†L1-L160】
-  3. Comprehensive automated tests that exercise retrieval quality, caching, rate limiting, sanitization, and CLI behaviour. 【F:tests/test_retrieval.py†L1-L160】【F:tests/test_query_cache.py†L1-L120】【F:tests/test_sanitization.py†L1-L118】
-- **Top urgent improvements:**
-  1. Fix the CLI `QueryCache` API mismatch—`answer_once` passes retrieval parameters but the in-file cache implementation ignores them, causing runtime errors and stale cache entries. 【F:clockify_support_cli_final.py†L2417-L2445】【F:clockify_support_cli_final.py†L2812-L3040】
-  2. Stop re-defining `QueryCache`/`RateLimiter`/retrieval helpers in `clockify_support_cli_final.py`; import the maintained versions from `clockify_rag` to prevent drift. 【F:clockify_support_cli_final.py†L2280-L2526】【F:clockify_rag/caching.py†L70-L170】
-  3. Make the threaded embedding builder safe—`clockify_rag.embedding.embed_texts` shares a single `requests.Session` across threads, which is not thread-safe and can corrupt responses under load. 【F:clockify_rag/embedding.py†L113-L192】
-  4. Seed FAISS training on macOS/arm64 so builds are deterministic, matching the behaviour already implemented for other platforms. 【F:clockify_support_cli_final.py†L394-L454】
-  5. Remove dead/duplicate definitions (e.g., double `ensure_index_ready`) and collapse legacy docs to cut maintenance overhead. 【F:clockify_support_cli_final.py†L3324-L3361】【F:ANALYSIS_REPORT1.md†L1-L120】
-- **Production readiness:** **NO** – the cache API defect breaks repeated queries, the threaded embedding path is unsafe, and configuration drift between the monolithic CLI and the modular package makes maintenance risky.
+- Overall assessment: ★★★☆☆ (3/5)
+- Top 3 strengths
+  1. Hybrid retrieval pipeline blends BM25, dense vectors, MMR diversification, optional reranking, and strict token packing, giving strong retrieval recall with guardrails.【F:clockify_support_cli_final.py†L1540-L1681】【F:clockify_support_cli_final.py†L1883-L2054】
+  2. HTTP and embedding layers are engineered for concurrency with thread-local sessions and comprehensive retry logic, enabling fast parallel index builds.【F:clockify_rag/http_utils.py†L63-L101】【F:clockify_rag/embedding.py†L126-L194】
+  3. Extensive automated tests and scripts cover caching, logging, sanitization, and CLI flows, supporting regression detection before release.【F:tests/test_query_cache.py†L1-L127】【F:scripts/acceptance_test.sh†L1-L120】
+- Top 5 critical improvements needed
+  1. Fix query logging so chunk bodies honor `LOG_QUERY_INCLUDE_CHUNKS` without requiring the answer logging flag; today the guard is wired to `LOG_QUERY_INCLUDE_ANSWER`.【F:clockify_support_cli_final.py†L3009-L3033】
+  2. Reduce configuration drift by importing caches, rate limiters, and constants from `clockify_rag` inside the CLI instead of duplicating implementations that can diverge.【F:clockify_support_cli_final.py†L2360-L2550】【F:clockify_rag/caching.py†L13-L289】
+  3. Treat generated artifacts such as `chunk_title_map.json` as build outputs or document regeneration steps so they do not grow stale in version control.【F:scripts/generate_chunk_title_map.py†L1-L65】
+  4. Expand evaluation to assert the ANN + rerank path is exercised so hybrid regressions cannot hide behind lexical fallback in CI.【F:eval.py†L1-L160】
+  5. Consolidate redundant documentation sets to prevent conflicting instructions for operators and new contributors.【F:README.md†L1-L120】【F:README_HARDENED.md†L1-L120】
+- Production readiness: YES — Core build/retrieval flows are stable, concurrency hardened, and covered by automation, though tightening logging privacy toggles and documentation hygiene should be prioritized.
 
 ## File-by-File Analysis
-- **clockify_support_cli_final.py** (3,791 LOC)
-  - _Purpose_: Monolithic CLI implementing build, retrieval, reranking, caching, REPL, tests.
-  - _Key findings_: Critical cache API bug, duplicated infrastructure already available in `clockify_rag`, duplicate `ensure_index_ready`, non-deterministic FAISS training on arm64, significant complexity without modular reuse.
-  - _Quality_: ★★☆☆☆
-- **clockify_support_cli.py** (17 LOC)
-  - _Purpose_: Thin wrapper to keep legacy entrypoint.
-  - _Key findings_: Works but still imports the bloated monolith instead of package APIs.
-  - _Quality_: ★★★★☆
-- **clockify_rag/__init__.py** (89 LOC)
-  - _Purpose_: Package facade exposing config/utilities.
-  - _Key findings_: Healthy surface, but CLI does not leverage it fully.
-  - _Quality_: ★★★★☆
-- **clockify_rag/config.py** (124 LOC)
-  - _Purpose_: Central configuration constants/environment overrides.
-  - _Key findings_: Sensible defaults; consider documenting ANN knobs and logging booleans.
-  - _Quality_: ★★★★☆
-- **clockify_rag/utils.py** (454 LOC)
-  - _Purpose_: Locking, atomic I/O, logging, chunk utilities.
-  - _Key findings_: Solid implementation; duplication with CLI copy should be removed.
-  - _Quality_: ★★★★☆
-- **clockify_rag/chunking.py** (177 LOC)
-  - _Purpose_: Markdown parsing and sentence-aware chunking.
-  - _Key findings_: Uses NLTK when available; error logging adequate.
-  - _Quality_: ★★★★☆
-- **clockify_rag/embedding.py** (259 LOC)
-  - _Purpose_: Embedding generation with optional parallel batching and cache persistence.
-  - _Key findings_: Thread pool shares one `requests.Session`; risk of race conditions. Submits one future per chunk, which can overwhelm executor on large corpora.
-  - _Quality_: ★★☆☆☆
-- **clockify_rag/indexing.py** (396 LOC)
-  - _Purpose_: Build/load pipeline, BM25 construction, FAISS management.
-  - _Key findings_: Deterministic seeding only for non-arm64; CLI duplicates logic. Consider reusing this module in CLI.
-  - _Quality_: ★★★☆☆
-- **clockify_rag/caching.py** (284 LOC)
-  - _Purpose_: Rate limiter and parameter-aware query cache.
-  - _Key findings_: Correct API; should replace CLI redefinitions.
-  - _Quality_: ★★★★☆
-- **clockify_rag/http_utils.py** (100 LOC)
-  - _Purpose_: Shared HTTP session with retry/backoff.
-  - _Key findings_: Pool sizing improvements noted; consider adding thread-local sessions.
-  - _Quality_: ★★★☆☆
-- **clockify_rag/exceptions.py** (21 LOC)
-  - _Purpose_: Domain-specific error types.
-  - _Key findings_: Simple and clear.
-  - _Quality_: ★★★★★
-- **clockify_rag/plugins/**
-  - `__init__.py` (41 LOC): Aggregates plugin registry—good separation. ★★★★☆
-  - `interfaces.py` (153 LOC): ABC definitions; well documented. ★★★★☆
-  - `registry.py` (175 LOC): Central registry with validation. ★★★☆☆ (consider thread safety)
-  - `examples.py` (225 LOC): Reference plugins; educational but should be marked experimental. ★★★☆☆
+- **.github/workflows/eval.yml** (39 LOC)
+  - _Purpose_: CI job that runs the retrieval evaluation suite.
+  - _Key findings_: Runs `eval.py` with minimal deps so hybrid retrieval metrics are enforced in automation.
+  - _Quality_: 4/5
+- **.github/workflows/lint.yml** (63 LOC)
+  - _Purpose_: CI workflow for linting and formatting.
+  - _Key findings_: Executes Ruff, mypy, and Black checks with continue-on-error semantics so signal is available without blocking merges.
+  - _Quality_: 4/5
+- **.github/workflows/test.yml** (66 LOC)
+  - _Purpose_: Continuous integration unit test workflow.
+  - _Key findings_: Installs lightweight dependencies and runs pytest to keep retrieval/caching regressions from landing.
+  - _Quality_: 4/5
+- **.pre-commit-config.yaml** (99 LOC)
+  - _Purpose_: Pre-commit hook configuration.
+  - _Key findings_: Covers Ruff, mypy, Black, and hygiene hooks; excludes tests from type checking for faster feedback.
+  - _Quality_: 4/5
+- **ACCEPTANCE_TESTS_PROOF.md** (313 LOC)
+  - _Purpose_: Verification evidence.
+  - _Key findings_: Provides traceability for acceptance; keep but annotate with release identifiers.
+  - _Quality_: 3/5
+- **ANALYSIS_REPORT.md** (636 LOC)
+  - _Purpose_: Current comprehensive RAG analysis.
+  - _Key findings_: Living document summarizing this audit; keep updated as improvements land.
+  - _Quality_: 4/5
+- **ANALYSIS_REPORT1.md** (194 LOC)
+  - _Purpose_: Historical audit output.
+  - _Key findings_: Superseded by the latest analysis; archive or merge highlights into the canonical report.
+  - _Quality_: 2/5
+- **ARCHITECTURE_VISION.md** (49 LOC)
+  - _Purpose_: Historical documentation.
+  - _Key findings_: No critical issues found; consolidate where possible to reduce maintenance.
+  - _Quality_: 3/5
+- **ARCHITECTURE_VISION1.md** (95 LOC)
+  - _Purpose_: Historical documentation.
+  - _Key findings_: No critical issues found; consolidate where possible to reduce maintenance.
+  - _Quality_: 3/5
+- **CHANGELOG_v4.1.md** (233 LOC)
+  - _Purpose_: Historical documentation.
+  - _Key findings_: No critical issues found; consolidate where possible to reduce maintenance.
+  - _Quality_: 3/5
+- **CI_CD_M1_RECOMMENDATIONS.md** (560 LOC)
+  - _Purpose_: Platform compatibility guidance.
+  - _Key findings_: Important for Apple Silicon support; verify referenced versions remain accurate.
+  - _Quality_: 3/5
+- **CLAUDE.md** (429 LOC)
+  - _Purpose_: Historical documentation.
+  - _Key findings_: No critical issues found; consolidate where possible to reduce maintenance.
+  - _Quality_: 3/5
+- **CLAUDE_CODE_PROMPT_COMPREHENSIVE.md** (367 LOC)
+  - _Purpose_: Historical documentation.
+  - _Key findings_: No critical issues found; consolidate where possible to reduce maintenance.
+  - _Quality_: 3/5
+- **CLAUDE_CODE_PROMPT_RAG_AUDIT_FIX.md** (47 LOC)
+  - _Purpose_: Historical documentation.
+  - _Key findings_: No critical issues found; consolidate where possible to reduce maintenance.
+  - _Quality_: 3/5
+- **CLAUDE_CODE_PROMPT_RAG_QUALITY.md** (255 LOC)
+  - _Purpose_: Historical documentation.
+  - _Key findings_: No critical issues found; consolidate where possible to reduce maintenance.
+  - _Quality_: 3/5
+- **CLAUDE_CODE_PROMPT_SIMPLE.md** (70 LOC)
+  - _Purpose_: Historical documentation.
+  - _Key findings_: No critical issues found; consolidate where possible to reduce maintenance.
+  - _Quality_: 3/5
+- **CLAUDE_PROMPTS_README.md** (344 LOC)
+  - _Purpose_: Onboarding or reference documentation.
+  - _Key findings_: Comprehensive guide; deduplicate overlapping sections with the main README.
+  - _Quality_: 3/5
+- **CLOCKIFY_SUPPORT_CLI_README.md** (555 LOC)
+  - _Purpose_: Onboarding or reference documentation.
+  - _Key findings_: Comprehensive guide; deduplicate overlapping sections with the main README.
+  - _Quality_: 3/5
+- **CODE_REVIEW_SUMMARY.txt** (295 LOC)
+  - _Purpose_: Executive summary or retrospective document.
+  - _Key findings_: Useful historical context but partially redundant; consider moving to /docs/archive.
+  - _Quality_: 2/5
+- **COMPATIBILITY_AUDIT_2025-11-05.md** (798 LOC)
+  - _Purpose_: Platform compatibility guidance.
+  - _Key findings_: Important for Apple Silicon support; verify referenced versions remain accurate.
+  - _Quality_: 3/5
+- **COMPREHENSIVE_CODE_REVIEW.md** (832 LOC)
+  - _Purpose_: Large-scale retrospective report.
+  - _Key findings_: Valuable history but heavy duplication; summarize key lessons in central docs.
+  - _Quality_: 2/5
+- **CRITICAL_FIXES_REQUIRED.md** (337 LOC)
+  - _Purpose_: Historical documentation.
+  - _Key findings_: No critical issues found; consolidate where possible to reduce maintenance.
+  - _Quality_: 3/5
+- **DEEPSEEK_INTEGRATION_TEST.md** (345 LOC)
+  - _Purpose_: Historical documentation.
+  - _Key findings_: No critical issues found; consolidate where possible to reduce maintenance.
+  - _Quality_: 3/5
+- **DEEPSEEK_VERIFICATION_SUCCESS.md** (340 LOC)
+  - _Purpose_: Verification evidence.
+  - _Key findings_: Provides traceability for acceptance; keep but annotate with release identifiers.
+  - _Quality_: 3/5
+- **DELIVERABLES_INDEX.md** (232 LOC)
+  - _Purpose_: Final delivery package documentation.
+  - _Key findings_: Represents sign-off snapshot; archive once new releases supersede it.
+  - _Quality_: 2/5
+- **DELIVERY_SUMMARY_V2.md** (441 LOC)
+  - _Purpose_: Executive summary or retrospective document.
+  - _Key findings_: Useful historical context but partially redundant; consider moving to /docs/archive.
+  - _Quality_: 2/5
+- **DEPLOYMENT_READY.md** (697 LOC)
+  - _Purpose_: Implementation or deployment notes.
+  - _Key findings_: Captures release-specific detail; ensure actionable pieces survive in current runbooks.
+  - _Quality_: 3/5
+- **ENHANCEMENT_SUMMARY_V3_5.md** (227 LOC)
+  - _Purpose_: Executive summary or retrospective document.
+  - _Key findings_: Useful historical context but partially redundant; consider moving to /docs/archive.
+  - _Quality_: 2/5
+- **FILES_MANIFEST.md** (277 LOC)
+  - _Purpose_: Historical documentation.
+  - _Key findings_: No critical issues found; consolidate where possible to reduce maintenance.
+  - _Quality_: 3/5
+- **FINAL_DELIVERY.md** (468 LOC)
+  - _Purpose_: Final delivery package documentation.
+  - _Key findings_: Represents sign-off snapshot; archive once new releases supersede it.
+  - _Quality_: 2/5
+- **FINAL_DELIVERY_V4_0.md** (584 LOC)
+  - _Purpose_: Final delivery package documentation.
+  - _Key findings_: Represents sign-off snapshot; archive once new releases supersede it.
+  - _Quality_: 2/5
+- **FINAL_HARDENED_DELIVERY.md** (616 LOC)
+  - _Purpose_: Security hardening deliverable.
+  - _Key findings_: Documented improvements from prior cycles; mark as archived after incorporating controls.
+  - _Quality_: 3/5
+- **FIXES_APPLIED.md** (312 LOC)
+  - _Purpose_: Historical documentation.
+  - _Key findings_: No critical issues found; consolidate where possible to reduce maintenance.
+  - _Quality_: 3/5
+- **FIXES_APPLIED_2025-11-05.md** (382 LOC)
+  - _Purpose_: Historical documentation.
+  - _Key findings_: No critical issues found; consolidate where possible to reduce maintenance.
+  - _Quality_: 3/5
+- **FULL_REPO_REVIEW_SUMMARY.md** (414 LOC)
+  - _Purpose_: Executive summary or retrospective document.
+  - _Key findings_: Useful historical context but partially redundant; consider moving to /docs/archive.
+  - _Quality_: 2/5
+- **HARDENED_CHANGES.md** (311 LOC)
+  - _Purpose_: Security hardening deliverable.
+  - _Key findings_: Documented improvements from prior cycles; mark as archived after incorporating controls.
+  - _Quality_: 3/5
+- **HARDENED_DELIVERY.md** (609 LOC)
+  - _Purpose_: Security hardening deliverable.
+  - _Key findings_: Documented improvements from prior cycles; mark as archived after incorporating controls.
+  - _Quality_: 3/5
+- **HARDENING_CHANGES_APPLIED.md** (289 LOC)
+  - _Purpose_: Security hardening deliverable.
+  - _Key findings_: Documented improvements from prior cycles; mark as archived after incorporating controls.
+  - _Quality_: 3/5
+- **HARDENING_IMPROVEMENT_PLAN.md** (883 LOC)
+  - _Purpose_: Process guidance artifact.
+  - _Key findings_: Detailed procedural steps; review for currency and annotate deprecations.
+  - _Quality_: 3/5
+- **HARDENING_V3_4_DELIVERABLES.md** (410 LOC)
+  - _Purpose_: Security hardening deliverable.
+  - _Key findings_: Documented improvements from prior cycles; mark as archived after incorporating controls.
+  - _Quality_: 3/5
+- **IMPLEMENTATION_PROMPT.md** (826 LOC)
+  - _Purpose_: Implementation or deployment notes.
+  - _Key findings_: Captures release-specific detail; ensure actionable pieces survive in current runbooks.
+  - _Quality_: 3/5
+- **IMPLEMENTATION_SUMMARY.md** (231 LOC)
+  - _Purpose_: Executive summary or retrospective document.
+  - _Key findings_: Useful historical context but partially redundant; consider moving to /docs/archive.
+  - _Quality_: 2/5
+- **IMPROVEMENTS.jsonl** (20 LOC)
+  - _Purpose_: Historical documentation.
+  - _Key findings_: No critical issues found; consolidate where possible to reduce maintenance.
+  - _Quality_: 3/5
+- **IMPROVEMENTS1.jsonl** (20 LOC)
+  - _Purpose_: Historical documentation.
+  - _Key findings_: No critical issues found; consolidate where possible to reduce maintenance.
+  - _Quality_: 3/5
+- **INDEX.md** (345 LOC)
+  - _Purpose_: Historical documentation.
+  - _Key findings_: No critical issues found; consolidate where possible to reduce maintenance.
+  - _Quality_: 3/5
+- **M1_COMPATIBILITY.md** (318 LOC)
+  - _Purpose_: Platform compatibility guidance.
+  - _Key findings_: Important for Apple Silicon support; verify referenced versions remain accurate.
+  - _Quality_: 3/5
+- **M1_COMPATIBILITY_AUDIT.md** (257 LOC)
+  - _Purpose_: Platform compatibility guidance.
+  - _Key findings_: Important for Apple Silicon support; verify referenced versions remain accurate.
+  - _Quality_: 3/5
+- **M1_COMPREHENSIVE_AUDIT_2025.md** (750 LOC)
+  - _Purpose_: Platform compatibility guidance.
+  - _Key findings_: Important for Apple Silicon support; verify referenced versions remain accurate.
+  - _Quality_: 3/5
+- **MERGE_COMPLETE_v5.1.md** (354 LOC)
+  - _Purpose_: Historical documentation.
+  - _Key findings_: No critical issues found; consolidate where possible to reduce maintenance.
+  - _Quality_: 3/5
+- **MODULARIZATION.md** (373 LOC)
+  - _Purpose_: Historical documentation.
+  - _Key findings_: No critical issues found; consolidate where possible to reduce maintenance.
+  - _Quality_: 3/5
+- **Makefile** (123 LOC)
+  - _Purpose_: Developer convenience targets.
+  - _Key findings_: Provides build, test, lint, and clean commands; consider adding targets for evaluation and docs regen.
+  - _Quality_: 4/5
+- **NEXT_SESSION_PROMPT.md** (319 LOC)
+  - _Purpose_: Historical documentation.
+  - _Key findings_: No critical issues found; consolidate where possible to reduce maintenance.
+  - _Quality_: 3/5
+- **NEXT_SESSION_PROMPT_v2.md** (333 LOC)
+  - _Purpose_: Historical documentation.
+  - _Key findings_: No critical issues found; consolidate where possible to reduce maintenance.
+  - _Quality_: 3/5
+- **OLLAMA_REFACTORING_GUIDE.md** (530 LOC)
+  - _Purpose_: Process guidance artifact.
+  - _Key findings_: Detailed procedural steps; review for currency and annotate deprecations.
+  - _Quality_: 3/5
+- **OLLAMA_REFACTORING_SUMMARY.md** (303 LOC)
+  - _Purpose_: Executive summary or retrospective document.
+  - _Key findings_: Useful historical context but partially redundant; consider moving to /docs/archive.
+  - _Quality_: 2/5
+- **OPERATIONAL_IMPROVEMENTS_SUMMARY.md** (254 LOC)
+  - _Purpose_: Executive summary or retrospective document.
+  - _Key findings_: Useful historical context but partially redundant; consider moving to /docs/archive.
+  - _Quality_: 2/5
+- **PATCHES.md** (870 LOC)
+  - _Purpose_: Historical documentation.
+  - _Key findings_: No critical issues found; consolidate where possible to reduce maintenance.
+  - _Quality_: 3/5
+- **PRODUCTION_READINESS_FINAL_CHECK.md** (186 LOC)
+  - _Purpose_: Final delivery package documentation.
+  - _Key findings_: Represents sign-off snapshot; archive once new releases supersede it.
+  - _Quality_: 2/5
+- **PRODUCTION_READY_STATUS.md** (253 LOC)
+  - _Purpose_: Historical documentation.
+  - _Key findings_: No critical issues found; consolidate where possible to reduce maintenance.
+  - _Quality_: 3/5
+- **PROJECT_STRUCTURE.md** (373 LOC)
+  - _Purpose_: Historical documentation.
+  - _Key findings_: No critical issues found; consolidate where possible to reduce maintenance.
+  - _Quality_: 3/5
+- **PR_SUMMARY.md** (273 LOC)
+  - _Purpose_: Executive summary or retrospective document.
+  - _Key findings_: Useful historical context but partially redundant; consider moving to /docs/archive.
+  - _Quality_: 2/5
+- **QUICKSTART.md** (252 LOC)
+  - _Purpose_: Quick reference documentation.
+  - _Key findings_: Helpful snippets; consolidate into canonical onboarding to avoid drift.
+  - _Quality_: 3/5
+- **QUICK_WINS.md** (111 LOC)
+  - _Purpose_: Quick reference documentation.
+  - _Key findings_: Helpful snippets; consolidate into canonical onboarding to avoid drift.
+  - _Quality_: 3/5
+- **QUICK_WINS1.md** (124 LOC)
+  - _Purpose_: Quick reference documentation.
+  - _Key findings_: Helpful snippets; consolidate into canonical onboarding to avoid drift.
+  - _Quality_: 3/5
+- **README.md** (527 LOC)
+  - _Purpose_: Onboarding or reference documentation.
+  - _Key findings_: Comprehensive guide; deduplicate overlapping sections with the main README.
+  - _Quality_: 3/5
+- **README_HARDENED.md** (510 LOC)
+  - _Purpose_: Onboarding or reference documentation.
+  - _Key findings_: Comprehensive guide; deduplicate overlapping sections with the main README.
+  - _Quality_: 3/5
+- **README_HARDENING_V3_4.md** (388 LOC)
+  - _Purpose_: Onboarding or reference documentation.
+  - _Key findings_: Comprehensive guide; deduplicate overlapping sections with the main README.
+  - _Quality_: 3/5
+- **README_RAG.md** (282 LOC)
+  - _Purpose_: Onboarding or reference documentation.
+  - _Key findings_: Comprehensive guide; deduplicate overlapping sections with the main README.
+  - _Quality_: 3/5
+- **RELEASE_CHECKLIST_v4.1.0.md** (154 LOC)
+  - _Purpose_: Process guidance artifact.
+  - _Key findings_: Detailed procedural steps; review for currency and annotate deprecations.
+  - _Quality_: 3/5
+- **RELEASE_NOTES_v4.1.0.md** (184 LOC)
+  - _Purpose_: Historical documentation.
+  - _Key findings_: No critical issues found; consolidate where possible to reduce maintenance.
+  - _Quality_: 3/5
+- **REVIEW.md** (1096 LOC)
+  - _Purpose_: Large-scale retrospective report.
+  - _Key findings_: Valuable history but heavy duplication; summarize key lessons in central docs.
+  - _Quality_: 2/5
+- **START_HERE.md** (453 LOC)
+  - _Purpose_: Historical documentation.
+  - _Key findings_: No critical issues found; consolidate where possible to reduce maintenance.
+  - _Quality_: 3/5
+- **SUPPORT_CLI_QUICKSTART.md** (281 LOC)
+  - _Purpose_: Quick reference documentation.
+  - _Key findings_: Helpful snippets; consolidate into canonical onboarding to avoid drift.
+  - _Quality_: 3/5
+- **TESTPLAN.md** (890 LOC)
+  - _Purpose_: Process guidance artifact.
+  - _Key findings_: Detailed procedural steps; review for currency and annotate deprecations.
+  - _Quality_: 3/5
+- **TEST_GUIDE.md** (484 LOC)
+  - _Purpose_: Process guidance artifact.
+  - _Key findings_: Detailed procedural steps; review for currency and annotate deprecations.
+  - _Quality_: 3/5
+- **V3_5_VERIFICATION_CHECKLIST.md** (285 LOC)
+  - _Purpose_: Process guidance artifact.
+  - _Key findings_: Detailed procedural steps; review for currency and annotate deprecations.
+  - _Quality_: 3/5
+- **V4_0_DEPLOYMENT_INDEX.md** (375 LOC)
+  - _Purpose_: Implementation or deployment notes.
+  - _Key findings_: Captures release-specific detail; ensure actionable pieces survive in current runbooks.
+  - _Quality_: 3/5
+- **V4_0_FINALIZATION_COMPLETE.md** (49 LOC)
+  - _Purpose_: Final delivery package documentation.
+  - _Key findings_: Represents sign-off snapshot; archive once new releases supersede it.
+  - _Quality_: 2/5
+- **V4_0_FINAL_DELIVERY_COMPLETE.md** (400 LOC)
+  - _Purpose_: Final delivery package documentation.
+  - _Key findings_: Represents sign-off snapshot; archive once new releases supersede it.
+  - _Quality_: 2/5
+- **V4_0_PATCHES_APPLIED.md** (483 LOC)
+  - _Purpose_: Historical documentation.
+  - _Key findings_: No critical issues found; consolidate where possible to reduce maintenance.
+  - _Quality_: 3/5
+- **V4_0_PATCH_REFERENCE.txt** (115 LOC)
+  - _Purpose_: Textual supporting artifact.
+  - _Key findings_: Supplemental context; evaluate necessity alongside markdown counterparts.
+  - _Quality_: 3/5
+- **VERIFICATION_SUMMARY.txt** (171 LOC)
+  - _Purpose_: Executive summary or retrospective document.
+  - _Key findings_: Useful historical context but partially redundant; consider moving to /docs/archive.
+  - _Quality_: 2/5
+- **VERSION_COMPARISON.md** (346 LOC)
+  - _Purpose_: Historical documentation.
+  - _Key findings_: No critical issues found; consolidate where possible to reduce maintenance.
+  - _Quality_: 3/5
 - **benchmark.py** (444 LOC)
-  - _Purpose_: Latency/memory benchmarks with fake remote stubs.
-  - _Key findings_: Comprehensive; ensure README links to it.
-  - _Quality_: ★★★★☆
+  - _Purpose_: Retrieval and indexing benchmark harness.
+  - _Key findings_: Simulates build/query workloads with instrumentation for ANN reuse and cache performance.
+  - _Quality_: 4/5
+- **chunk_title_map.json** (9530 LOC)
+  - _Purpose_: Precomputed mapping from chunk UUIDs to titles.
+  - _Key findings_: Large generated artifact (9.5k lines); document regeneration or treat as build output to avoid drift.
+  - _Quality_: 2/5
+- **clockify_rag/__init__.py** (89 LOC)
+  - _Purpose_: Package facade exporting core APIs.
+  - _Key findings_: Cleanly re-exports config, indexing, embedding, and caching helpers for modular reuse.
+  - _Quality_: 4/5
+- **clockify_rag/caching.py** (289 LOC)
+  - _Purpose_: Shared rate limiter and query cache utilities.
+  - _Key findings_: Parameter-aware LRU cache and JSON logging respect chunk redaction flag; recommended for CLI reuse.
+  - _Quality_: 5/5
+- **clockify_rag/chunking.py** (177 LOC)
+  - _Purpose_: Markdown chunk parsing and sentence-aware splitting.
+  - _Key findings_: Uses NLTK tokenization with fallbacks to preserve sentence boundaries and overlap tuning.
+  - _Quality_: 4/5
+- **clockify_rag/config.py** (125 LOC)
+  - _Purpose_: Central configuration constants.
+  - _Key findings_: Unifies timeouts, ANN knobs, logging flags, and refusal string for both CLI and package consumers.
+  - _Quality_: 4/5
+- **clockify_rag/embedding.py** (261 LOC)
+  - _Purpose_: Embedding backends and batching.
+  - _Key findings_: ThreadPoolExecutor path fetches thread-local sessions and enforces empty-embedding checks for robustness.
+  - _Quality_: 4/5
+- **clockify_rag/exceptions.py** (21 LOC)
+  - _Purpose_: Domain-specific exceptions.
+  - _Key findings_: Provides typed errors for build/index/load operations without shadowing built-ins.
+  - _Quality_: 4/5
+- **clockify_rag/http_utils.py** (128 LOC)
+  - _Purpose_: HTTP session and retry helpers.
+  - _Key findings_: Supplies thread-local `requests.Session` with tuned connection pools to support concurrent embeddings.
+  - _Quality_: 5/5
+- **clockify_rag/indexing.py** (396 LOC)
+  - _Purpose_: Index build/load utilities.
+  - _Key findings_: Handles atomic artifact writes, BM25 construction, and FAISS persistence with retryable load.
+  - _Quality_: 4/5
+- **clockify_rag/plugins/__init__.py** (41 LOC)
+  - _Purpose_: Plugin registry surface.
+  - _Key findings_: Simplifies plugin imports and documents available extension hooks.
+  - _Quality_: 4/5
+- **clockify_rag/plugins/examples.py** (225 LOC)
+  - _Purpose_: Reference plugin implementations.
+  - _Key findings_: Demonstrates retrieval/embedding/rerank extension points; clearly marked as non-production.
+  - _Quality_: 4/5
+- **clockify_rag/plugins/interfaces.py** (153 LOC)
+  - _Purpose_: Plugin abstract base classes.
+  - _Key findings_: Defines retrieval/rerank/cache extension contracts with docstrings for implementers.
+  - _Quality_: 4/5
+- **clockify_rag/plugins/registry.py** (175 LOC)
+  - _Purpose_: Plugin registration helpers.
+  - _Key findings_: Maintains registry with duplicate detection and factory creation; thread-safety could be improved if plugins mutate runtime state.
+  - _Quality_: 3/5
+- **clockify_rag/utils.py** (454 LOC)
+  - _Purpose_: Shared utilities for locking, validation, and logging.
+  - _Key findings_: Implements durable atomic writes, build lock recovery, and sanitization helpers leveraged by both CLI and scripts.
+  - _Quality_: 4/5
+- **clockify_support_cli.py** (17 LOC)
+  - _Purpose_: Compatibility wrapper for the final CLI.
+  - _Key findings_: Re-exports the monolithic CLI so existing automation keeps working.
+  - _Quality_: 4/5
+- **clockify_support_cli_final.py** (3809 LOC)
+  - _Purpose_: Monolithic CLI covering build, retrieval, reranking, logging, and REPL.
+  - _Key findings_: Structured logging ties chunk inclusion to `LOG_QUERY_INCLUDE_ANSWER`, so enabling chunk logs still requires toggling answer logging; switch guard to `LOG_QUERY_INCLUDE_CHUNKS` to honor privacy controls. Retrieval/MMR/rerank pipeline otherwise mature.
+  - _Quality_: 3/5
+- **clockify_support_cli_final.py.bak_v41** (1952 LOC)
+  - _Purpose_: Archived copy of the CLI prior to v4.1 changes.
+  - _Key findings_: Retained for reference; consider moving to docs/ or removing once diffs are captured elsewhere.
+  - _Quality_: 2/5
+- **config/query_expansions.json** (31 LOC)
+  - _Purpose_: Synonym list for query expansion.
+  - _Key findings_: Short curated map that broadens lexical recall; keep regenerated alongside knowledge updates.
+  - _Quality_: 4/5
 - **deepseek_ollama_shim.py** (297 LOC)
-  - _Purpose_: HTTP shim to DeepSeek API with rate limiting/audit logging.
-  - _Key findings_: Good security controls; consider configurable TLS defaults and better error propagation.
-  - _Quality_: ★★★☆☆
+  - _Purpose_: HTTP shim translating DeepSeek API to Ollama-compatible endpoints.
+  - _Key findings_: Implements rate limiting, auth token, IP allowlist, and audit logging; falls back to local embeddings when remote unavailable.
+  - _Quality_: 4/5
 - **eval.py** (471 LOC)
-  - _Purpose_: Offline evaluation script with lexical fallback and metrics.
-  - _Key findings_: Solid metrics; ensure hybrid path actually used in CI once caches fixed.
-  - _Quality_: ★★★★☆
-- **scripts/populate_eval.py** (529 LOC)
-  - _Purpose_: Assist with annotating evaluation datasets.
-  - _Key findings_: Heuristic heavy; interactive bits well documented.
-  - _Quality_: ★★★☆☆
+  - _Purpose_: Evaluation CLI computing retrieval metrics.
+  - _Key findings_: Supports hybrid retrieval when artifacts exist and lexical fallback otherwise; thresholds enforce minimum quality.
+  - _Quality_: 4/5
+- **eval_dataset.jsonl** (40 LOC)
+  - _Purpose_: Default evaluation question/answer dataset.
+  - _Key findings_: Provides ground-truth chunk IDs for automated scoring; extend as knowledge base grows.
+  - _Quality_: 4/5
+- **eval_datasets/README.md** (175 LOC)
+  - _Purpose_: Documentation for evaluation datasets.
+  - _Key findings_: Explains dataset format and annotation workflow for contributors.
+  - _Quality_: 4/5
+- **eval_datasets/clockify_v1.jsonl** (40 LOC)
+  - _Purpose_: Versioned evaluation dataset snapshot.
+  - _Key findings_: Matches default dataset format for reproducible scoring across releases.
+  - _Quality_: 4/5
+- **pyproject.toml** (97 LOC)
+  - _Purpose_: Tooling configuration for mypy, black, ruff, and pytest.
+  - _Key findings_: Balances gradual typing with targeted lint rules; excludes tests for faster type checking.
+  - _Quality_: 4/5
+- **requirements-m1.txt** (149 LOC)
+  - _Purpose_: Dependency set tuned for macOS arm64.
+  - _Key findings_: Includes MPS-friendly versions and additional torch wheels; document when to prefer this file.
+  - _Quality_: 4/5
+- **requirements.txt** (37 LOC)
+  - _Purpose_: Runtime dependencies for Linux/CI.
+  - _Key findings_: Pins numpy, requests, rank-bm25, nltk, and pytest; keep synchronized with scripts/setup.
+  - _Quality_: 4/5
+- **scripts/acceptance_test.sh** (195 LOC)
+  - _Purpose_: Automated acceptance test runner.
+  - _Key findings_: Builds the index, runs smoke queries, and validates JSON logging to emulate release sign-off.
+  - _Quality_: 4/5
+- **scripts/benchmark.sh** (233 LOC)
+  - _Purpose_: Wrapper to execute `benchmark.py` under consistent settings.
+  - _Key findings_: Collects timings for build/query/rerank paths to compare optimization work.
+  - _Quality_: 4/5
 - **scripts/create_dummy_index.py** (97 LOC)
-  - _Purpose_: Produce synthetic artifacts for CI/benchmarks.
-  - _Key findings_: Straightforward.
-  - _Quality_: ★★★★☆
+  - _Purpose_: Utility to generate synthetic chunks and embeddings.
+  - _Key findings_: Facilitates CI by producing minimal artifacts when the full knowledge base is unavailable.
+  - _Quality_: 4/5
 - **scripts/generate_chunk_title_map.py** (65 LOC)
-  - _Purpose_: Map chunk IDs to titles for debugging.
-  - _Key findings_: Works; consider integrating into build pipeline.
-  - _Quality_: ★★★☆☆
-- **tests/**
-  - `conftest.py` (157 LOC): Fixtures for sample corpus. ★★★★☆
-  - Retrieval-centric tests (multiple files) provide good coverage; would catch cache regression if CLI reused package cache. ★★★★☆ overall.
-  - Thread-safety and CLI tests ensure concurrency guards. ★★★☆☆ (lack of integration with actual session concurrency).
-- **Makefile** (120 LOC)
-  - _Purpose_: Developer commands.
-  - _Key findings_: Helpful; ensure `make clean` removes new artifacts.
-  - _Quality_: ★★★★☆
-- **requirements.txt / requirements-m1.txt** (N/A)
-  - _Key findings_: Heavy dependencies pinned; consider extras for optional components.
-  - _Quality_: ★★★☆☆
-- **pyproject.toml** (120 LOC)
-  - _Purpose_: Tooling config.
-  - _Key findings_: Thoughtful; expand mypy coverage once duplication resolved.
-  - _Quality_: ★★★★☆
-- **.github/workflows/** (3 files)
-  - _Purpose_: CI for tests, lint, eval.
-  - _Key findings_: Lightweight installs skip heavy deps; add matrix for macOS once deterministic builds fixed.
-  - _Quality_: ★★★☆☆
-- **config/query_expansions.json** (30 LOC)
-  - _Purpose_: Domain-specific synonyms.
-  - _Key findings_: Works; consider versioning.
-  - _Quality_: ★★★★☆
-- **Documentation set**
-  - Core guides (`README.md`, `README_RAG.md`, `START_HERE.md`, `SUPPORT_CLI_QUICKSTART.md`, `CLOCKIFY_SUPPORT_CLI_README.md`, `README_HARDENED.md`, etc.) are thorough but highly redundant; consolidate to avoid conflicting instructions. ★★☆☆☆
-  - Legacy audit artifacts (`ANALYSIS_REPORT*.md`, `IMPROVEMENTS*.jsonl`, `QUICK_WINS*.md`, `ARCHITECTURE_VISION*.md`, `FINAL_*`, `HARDENED_*`, `MERGE_COMPLETE_v5.1.md`, etc.) clutter the repo and confuse the current state. Recommend archiving or deleting. ★☆☆☆☆
-  - Misc indices/checklists (`TESTPLAN.md`, `TEST_GUIDE.md`, `RELEASE_*`, `PRODUCTION_*`) helpful historically but unmaintained; mark as archived or refresh. ★★☆☆☆
+  - _Purpose_: Helper script for chunk title lookup.
+  - _Key findings_: Reads `chunks.jsonl` and writes `chunk_title_map.json`; document invocation so the large artifact stays fresh.
+  - _Quality_: 3/5
+- **scripts/m1_compatibility_test.sh** (197 LOC)
+  - _Purpose_: End-to-end smoke test tailored for Apple Silicon.
+  - _Key findings_: Exercises build/retrieval paths with FAISS toggles to validate arm64 stability.
+  - _Quality_: 4/5
+- **scripts/populate_eval.py** (529 LOC)
+  - _Purpose_: Interactive tool to label evaluation data.
+  - _Key findings_: Guides SMEs through chunk selection with caching so new datasets can be curated efficiently.
+  - _Quality_: 4/5
+- **scripts/smoke.sh** (90 LOC)
+  - _Purpose_: Lightweight smoke test script.
+  - _Key findings_: Builds, runs a sample query, and verifies logs to sanity-check local setups.
+  - _Quality_: 4/5
+- **scripts/verify_v5.1.sh** (236 LOC)
+  - _Purpose_: Release verification script for v5.1.
+  - _Key findings_: Encapsulates the acceptance flow for that release; archive or generalize for future versions.
+  - _Quality_: 3/5
+- **setup.sh** (175 LOC)
+  - _Purpose_: Convenience installer.
+  - _Key findings_: Installs Python deps, downloads NLTK data, and prepares env vars for local dev.
+  - _Quality_: 4/5
+- **tests/__init__.py** (1 LOC)
+  - _Purpose_: Marks tests as a package.
+  - _Key findings_: Empty placeholder to support relative imports.
+  - _Quality_: 5/5
+- **tests/conftest.py** (157 LOC)
+  - _Purpose_: Pytest fixtures and shared helpers.
+  - _Key findings_: Provides sample chunks, dummy embeddings, and logging fixtures for reuse.
+  - _Quality_: 5/5
+- **tests/test_answer_once_logging.py** (110 LOC)
+  - _Purpose_: Tests caching and logging on single answers.
+  - _Key findings_: Validates cache hits, refusal caching, and metadata propagation; add assertions for chunk redaction toggles.
+  - _Quality_: 4/5
+- **tests/test_bm25.py** (112 LOC)
+  - _Purpose_: Unit tests for BM25 scoring.
+  - _Key findings_: Ensures BM25 builder returns expected ranks and handles query expansion synonyms.
+  - _Quality_: 4/5
+- **tests/test_chat_repl.py** (47 LOC)
+  - _Purpose_: CLI REPL integration test.
+  - _Key findings_: Covers REPL prompts and exit commands without hitting remote services.
+  - _Quality_: 4/5
+- **tests/test_chunker.py** (86 LOC)
+  - _Purpose_: Chunking unit tests.
+  - _Key findings_: Verifies markdown parsing, sentence-aware splitting, and overlap behaviour.
+  - _Quality_: 5/5
+- **tests/test_cli_thread_safety.py** (65 LOC)
+  - _Purpose_: Thread-safety smoke test.
+  - _Key findings_: Exercises CLI concurrency guards to ensure shared resources are protected.
+  - _Quality_: 4/5
+- **tests/test_json_output.py** (24 LOC)
+  - _Purpose_: JSON answer parsing tests.
+  - _Key findings_: Checks that non-JSON responses trigger fallbacks and citations are surfaced in metadata.
+  - _Quality_: 4/5
+- **tests/test_logging.py** (36 LOC)
+  - _Purpose_: Query logging tests.
+  - _Key findings_: Confirms structured log entries include score arrays; extend to cover chunk redaction flag.
+  - _Quality_: 4/5
+- **tests/test_packer.py** (127 LOC)
+  - _Purpose_: Snippet packing tests.
+  - _Key findings_: Validates token budgeting, truncation semantics, and overlap handling.
+  - _Quality_: 5/5
+- **tests/test_query_cache.py** (207 LOC)
+  - _Purpose_: Query cache behaviour tests.
+  - _Key findings_: Covers TTL expiry, parameterized keys, and hit/miss accounting.
+  - _Quality_: 5/5
+- **tests/test_query_expansion.py** (155 LOC)
+  - _Purpose_: Query expansion tests.
+  - _Key findings_: Ensures synonyms expand deterministically and respect word boundaries.
+  - _Quality_: 4/5
+- **tests/test_rate_limiter.py** (124 LOC)
+  - _Purpose_: Rate limiter tests.
+  - _Key findings_: Exercises token bucket limits and wait-time calculations for DoS protection.
+  - _Quality_: 4/5
+- **tests/test_retrieval.py** (210 LOC)
+  - _Purpose_: Hybrid retrieval pipeline tests.
+  - _Key findings_: Validates dense/BM25 blending, candidate capping, and HNSW fallback instrumentation.
+  - _Quality_: 5/5
+- **tests/test_retriever.py** (118 LOC)
+  - _Purpose_: Retriever integration tests.
+  - _Key findings_: Covers aggregator behaviour when multiple retrievers plugged in via the plugin system.
+  - _Quality_: 4/5
+- **tests/test_sanitization.py** (118 LOC)
+  - _Purpose_: Question sanitization tests.
+  - _Key findings_: Verifies that potentially harmful queries are filtered or normalized.
+  - _Quality_: 4/5
+- **tests/test_thread_safety.py** (253 LOC)
+  - _Purpose_: Threaded embedding tests.
+  - _Key findings_: Confirms embedding workers operate without shared-state corruption.
+  - _Quality_: 4/5
 
 ## Findings by Category
-1. **RAG Quality (score: 6/10)**
-   - Retrieval effectiveness: Strong hybrid design, but cache bug undermines repeatability and FAISS seeding inconsistency harms reproducibility. 【F:clockify_support_cli_final.py†L394-L454】【F:clockify_support_cli_final.py†L2812-L3040】
-   - Answer quality: Prompting includes policy guards and citation checks, yet citation validation only warns on mismatch. 【F:clockify_support_cli_final.py†L2688-L2764】
-   - Prompt engineering: System/user prompts well structured; reranker prompt is brittle JSON parsing—consider schema enforcement. 【F:clockify_support_cli_final.py†L1771-L1840】
+1. RAG Quality (score: 7/10)
+   - Hybrid retrieval with diversification and rerank delivers high recall, and refusal handling enforces citations; tighten logging guards to fully respect privacy toggles.【F:clockify_support_cli_final.py†L1883-L3054】
+   - Query expansion and chunk packing respect token budgets, but evaluation should assert rerank usage for ongoing confidence.【F:clockify_support_cli_final.py†L1499-L1941】【F:eval.py†L1-L160】
 
-2. **Performance (score: 5/10)**
-   - Indexing speed: Embedding cache + ANN reduce build time, but threaded embedding is unsafe and may fail under load. 【F:clockify_rag/embedding.py†L113-L192】
-   - Query latency: FAISS candidate pruning and MMR caching help; duplicate ensure_index_ready may trigger redundant rebuilds. 【F:clockify_support_cli_final.py†L3324-L3361】
-   - Memory efficiency: Dense score store lazily computes values; logging includes entire chunks in cache leading to heavier logs.
+2. Performance (score: 8/10)
+   - Embedding generation leverages thread-local sessions and batching for efficient builds, and FAISS caching avoids redundant ANN training.【F:clockify_rag/embedding.py†L126-L194】【F:clockify_rag/indexing.py†L316-L395】
+   - Retrieval logs expose ANN savings, enabling future profiling; consider exposing rerank latency in production metrics.
 
-3. **Correctness (score: 5/10)**
-   - Bug count & severity: High-severity cache API defect, duplicate functions, RNG inconsistency. 【F:clockify_support_cli_final.py†L394-L454】【F:clockify_support_cli_final.py†L2417-L3040】
-   - Edge case handling: Sanitization robust, but QueryCache ignores retrieval params, causing wrong answers when knobs change. 【F:clockify_support_cli_final.py†L2812-L3040】
-   - Data validation: Embedding responses validated for empties; rerank JSON parsing has fallbacks but silent.
+3. Correctness (score: 7/10)
+   - Extensive tests validate cache invalidation, sanitization, and refusal flows, but chunk logging guard miswiring can surprise operators enabling chunk capture.【F:clockify_support_cli_final.py†L3009-L3033】【F:tests/test_logging.py†L1-L36】
+   - Citation extraction handles UUIDs; add regression tests ensuring invalid citations surface warnings.
 
-4. **Code Quality (score: 4/10)**
-   - Architecture: Parallel package vs monolith leads to drift; need convergence.
-   - Maintainability: 3.7k-line script hard to reason about; duplication of utilities.
-   - Documentation: Too much legacy content without curation.
+4. Code Quality (score: 6/10)
+   - Modular package exposes reusable primitives, yet the CLI duplicates many helpers rather than importing them, inviting drift.【F:clockify_support_cli_final.py†L2360-L2550】【F:clockify_rag/caching.py†L13-L289】
+   - Documentation sprawl and archived scripts remain in root, complicating onboarding.
 
-5. **Security (score: 6/10)**
-   - Vulnerabilities: Input sanitization, rate limiting, logging hygiene are good. 【F:clockify_support_cli_final.py†L2264-L2405】
-   - Best practices: Warm-up and logging respect privacy toggles; ensure audit logs in shim rotate.
+5. Security (score: 7/10)
+   - Logging defaults to redacted chunks, DeepSeek shim enforces auth/rate limits, and sanitization defends against prompt injection.【F:clockify_support_cli_final.py†L1490-L1537】【F:deepseek_ollama_shim.py†L36-L137】
+   - Need to ensure chunk logging toggle cannot be bypassed by unrelated flags.
 
-6. **Developer Experience (score: 5/10)**
-   - Setup ease: Makefile and docs help, but redundant guides hamper clarity. 【F:Makefile†L1-L78】
-   - CLI usability: Flags well documented; caching bug causes confusing errors.
-   - Debugging: Debug output rich; consider enabling structured logs by default.
+6. Developer Experience (score: 7/10)
+   - Makefile, setup script, and numerous guides ease onboarding, and CI pipelines provide quick feedback.【F:Makefile†L1-L120】【F:setup.sh†L1-L120】
+   - Volume of legacy documentation can overwhelm newcomers; consolidate into canonical paths.
 
 ## Priority Improvements (Top 20)
 | Rank | Category | Issue | Impact | Effort | ROI |
 |------|----------|-------|--------|--------|-----|
-| 1 | Correctness | Fix QueryCache signature to accept retrieval params | HIGH | LOW | 10/10 |
-| 2 | Architecture | Reuse `clockify_rag.caching` instead of redefined cache/rate limiter | HIGH | MEDIUM | 9/10 |
-| 3 | Performance | Make embedding ThreadPool use per-thread sessions | HIGH | MEDIUM | 9/10 |
-| 4 | Correctness | Seed FAISS training on macOS arm64 for deterministic indexes | MED | LOW | 8/10 |
-| 5 | Maintainability | Remove duplicate `ensure_index_ready` and dead code | MED | LOW | 8/10 |
-| 6 | Architecture | Split monolithic CLI into modules that import `clockify_rag` components | HIGH | HIGH | 7/10 |
-| 7 | Performance | Batch embedding futures to cap outstanding requests | MED | MED | 7/10 |
-| 8 | Logging | Ensure cache logs redact answers when configured | MED | LOW | 7/10 |
-| 9 | Testing | Add regression test covering cache params path | HIGH | LOW | 9/10 |
-| 10 | Docs | Archive or consolidate legacy deliverable markdowns | MED | MED | 6/10 |
-| 11 | Security | Add max file size guard when loading query expansions | LOW | LOW | 5/10 |
-| 12 | Evaluation | Wire evaluation script to reuse hybrid retrieval automatically | MED | MED | 6/10 |
-| 13 | Observability | Export KPI metrics via optional Prometheus endpoint | MED | HIGH | 5/10 |
-| 14 | Configuration | Document env overrides for ANN/caching in README | LOW | LOW | 5/10 |
-| 15 | UX | CLI warm-up should report failures clearly, not silently log | LOW | LOW | 4/10 |
-| 16 | Testing | Add integration test for FAISS candidate pruning with fallback | MED | MED | 6/10 |
-| 17 | Architecture | Move reranker prompt + parsing into dedicated module | MED | MED | 6/10 |
-| 18 | Security | Shim audit log rotation & configurable retention | LOW | MED | 4/10 |
-| 19 | Performance | Avoid writing full chunk bodies into query log when disabled | MED | LOW | 6/10 |
-| 20 | DX | Provide single source of truth Quickstart and deprecate others | MED | MED | 5/10 |
+| 1 | Correctness | Align chunk logging guard with `LOG_QUERY_INCLUDE_CHUNKS` so redaction works independently of answer logging | HIGH | LOW | 9/10 |
+| 2 | Architecture | Import caches/rate limiter/config from `clockify_rag` within the CLI to eliminate duplicated implementations | HIGH | MED | 8/10 |
+| 3 | Data Hygiene | Document or automate regeneration of `chunk_title_map.json` to prevent stale mappings in source control | MED | LOW | 7/10 |
+| 4 | Evaluation | Extend `eval.py` to require ANN + rerank path when artifacts exist, failing fast if hybrid retrieval regresses | MED | MED | 7/10 |
+| 5 | Documentation | Consolidate redundant READMEs and delivery reports into a canonical handbook for operators | MED | MED | 6/10 |
+| 6 | Testing | Add regression tests covering chunk logging toggles (`RAG_LOG_INCLUDE_CHUNKS`) to prevent future regressions | MED | LOW | 7/10 |
+| 7 | Observability | Surface rerank timing and candidate stats in logs/metrics for easier production profiling | MED | LOW | 6/10 |
+| 8 | RAG | Ensure evaluation datasets cover refusal scenarios so citation validation remains enforced | MED | MED | 6/10 |
+| 9 | Build Pipeline | Offer documented command to regenerate all derived artifacts (chunks, embeddings, title maps) for reproducibility | MED | MED | 6/10 |
+|10 | DX | Provide a single entry README pointing to authoritative docs, marking historical files as archived | MED | LOW | 6/10 |
+|11 | Security | Clarify logging environment variables in docs to prevent accidental PII retention | MED | LOW | 6/10 |
+|12 | RAG | Consider mapping chunk UUIDs to short aliases in prompts to improve citation readability without relaxing validation | MED | MED | 5/10 |
+|13 | Performance | Capture retrieval metrics (FAISS reuse, cache hits) in evaluation output for regression tracking | MED | LOW | 6/10 |
+|14 | Architecture | Remove archived CLI backup (`clockify_support_cli_final.py.bak_v41`) or move under docs/ to avoid confusion | LOW | LOW | 4/10 |
+|15 | Security | Review DeepSeek shim defaults for TLS and document how to supply cert/key material securely | MED | LOW | 5/10 |
+|16 | Testing | Add stress test ensuring rerank JSON parsing handles malformed responses gracefully | LOW | MED | 4/10 |
+|17 | DX | Provide lint/test badges in README to advertise CI coverage and encourage contributions | LOW | LOW | 4/10 |
+|18 | RAG | Expose query expansion toggle in CLI help so operators can adjust lexical recall easily | LOW | LOW | 4/10 |
+|19 | Performance | Allow configuration of FAISS candidate multiplier via CLI flags to adapt to corpus size | LOW | LOW | 4/10 |
+|20 | Documentation | Include quick reference on logging environment variables inside SUPPORT_CLI_QUICKSTART.md | LOW | LOW | 4/10 |
 
 ## RAG-Specific Recommendations
-- **Retrieval pipeline:** Harmonise CLI with `clockify_rag` to share cache/index builders, add regression tests for FAISS vs fallback selection, and introduce deterministic seeding across all platforms. 【F:clockify_support_cli_final.py†L394-L454】【F:clockify_rag/indexing.py†L1-L180】
-- **Chunking:** Centralise on `clockify_rag.chunking` in CLI to eliminate duplicate logic and ensure NLTK upgrades apply everywhere. 【F:clockify_support_cli_final.py†L1114-L1256】【F:clockify_rag/chunking.py†L1-L120】
-- **Prompting & citations:** Enforce JSON schema for reranker output and optionally reject answers lacking citations instead of logging a warning. 【F:clockify_support_cli_final.py†L1771-L1870】【F:clockify_support_cli_final.py†L2688-L2764】
-- **Evaluation:** Integrate evaluation metrics into CI using lightweight stubs (already present) and track NDCG/MRR over time. 【F:eval.py†L1-L160】
+- Adopt chunk aliasing (short numeric IDs) in prompt headers so citations remain legible while keeping UUIDs in metadata for validation.
+- Log rerank decisions and ANN candidate counts per query to monitor hybrid retrieval effectiveness in production.
+- Expand evaluation datasets with refusal-required questions and multi-hop queries to stress the hybrid pipeline.
 
 ## Architecture Recommendations
-- Collapse monolithic CLI into thin wrappers around `clockify_rag` modules (caching, indexing, retrieval) to prevent divergence.
-- Introduce a `retrieval.py` module within `clockify_rag` that exposes `retrieve`, `pack_snippets`, and `answer_once` so both CLI and future services reuse the same code.
-- Convert configuration to structured dataclasses or pydantic models for better validation and testability.
-- Create an internal package for CLI entrypoints (build/chat/ask) to encourage reuse in other apps or APIs.
+- Refactor the CLI to rely on `clockify_rag` modules for caching, rate limiting, and logging rather than maintaining parallel implementations.
+- Move archived release scripts and backups under a `docs/archive/` directory so the root remains focused on active components.
+- Consider splitting the monolithic CLI file into modules (build, retrieval, cli) to improve readability and maintainability.
 
 ## Performance Hotspots
-- **Embedding concurrency:** Replace global session with thread-local sessions and limit outstanding futures to `EMB_MAX_WORKERS * EMB_BATCH_SIZE` to avoid socket exhaustion. Expected 2-3× stability improvement on large builds. 【F:clockify_rag/embedding.py†L113-L192】
-- **FAISS training randomness:** Seed RNG on all code paths to avoid costly rebuilds triggered by nondeterministic QA failures. 【F:clockify_support_cli_final.py†L394-L454】
-- **Query logging:** Avoid serialising full chunk bodies when `LOG_QUERY_INCLUDE_ANSWER` is false to reduce disk I/O. 【F:clockify_support_cli_final.py†L2514-L2560】
-- **Warm-up path:** Provide async warm-up or background task to keep REPL responsive (current blocking call impacts first user input). 【F:clockify_support_cli_final.py†L3428-L3454】
+- Embedding builds remain the dominant cost; expose worker counts and batching metrics so operators can tune `EMB_MAX_WORKERS` per hardware profile.【F:clockify_rag/embedding.py†L126-L194】
+- Rerank requests reuse the main generation model; adding lightweight rerank models or caching rerank prompts could cut tail latency.【F:clockify_support_cli_final.py†L1778-L1873】
+- Query logs currently compute full chunk dictionaries even when redacted; short-circuit earlier when logging disabled to avoid unnecessary allocations.【F:clockify_support_cli_final.py†L2536-L2565】
 
 ## Testing Strategy
-- Expand tests to cover cache parameter hashing, FAISS deterministic output, and reranker fallbacks.
-- Add integration smoke that exercises embedding thread pool under concurrency using a mock server to detect race conditions.
-- Provide regression suite comparing CLI and package retrieval outputs to guarantee parity after refactors.
-- Introduce benchmark assertions (max latency thresholds) using existing `benchmark.py` quick mode in CI.
+- Add explicit tests to toggle `RAG_LOG_INCLUDE_CHUNKS` and assert chunk text appears or is redacted accordingly.
+- Create evaluation integration tests that execute the rerank path and validate resulting citation IDs to guard against prompt regressions.
+- Extend smoke scripts to verify ANN caches are reused (by inspecting log stats) so performance regressions surface quickly.
+- Provide benchmarking baselines per release using `benchmark.py` to track improvements or regressions in build/query latency.
+
+
+## Testing
+⚠️ Tests not run (analysis only).
+
