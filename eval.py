@@ -249,45 +249,61 @@ def evaluate(dataset_path="eval_datasets/clockify_v1.jsonl", verbose=False):
         print(f"Error preparing chunks: {exc}")
         sys.exit(1)
 
-    # Try to load the production hybrid index; fallback to lexical BM25
+    # Check for hybrid artifacts (Priority #4: fail fast if artifacts exist but hybrid unusable)
+    hybrid_artifacts_exist = (
+        os.path.exists("vecs_n.npy") and
+        os.path.exists("bm25.json") and
+        os.path.exists("chunks.jsonl")
+    )
+    faiss_available = os.path.exists("faiss.index")
+
+    # Try to load the production hybrid index; fallback to lexical BM25 only if NO artifacts exist
     rag_available = False
     retrieval_chunks = chunks
     retrieval_fn = None
     lexical_retriever = None
+    vecs_n = None
+    bm = None
+    hnsw = None
+    retrieval_mode = "unknown"
 
-    if os.path.exists("vecs_n.npy") and os.path.exists("bm25.json"):
+    if hybrid_artifacts_exist:
+        # Hybrid artifacts exist - MUST use hybrid path (Priority #4)
+        print("Hybrid artifacts detected - requiring hybrid retrieval path...")
         try:
             from clockify_support_cli_final import load_index, retrieve
 
             print("Loading knowledge base index...")
             result = load_index()
-            if result:
-                retrieval_chunks, vecs, bm, _ = result
-                retrieval_fn = lambda q: retrieve(q, retrieval_chunks, vecs, bm, top_k=TOP_K)[0]
-                rag_available = True
-        except Exception as exc:  # pragma: no cover - fallback path
-            print(f"Warning: Hybrid index unavailable ({exc}). Falling back to lexical BM25.")
+            if result is None:
+                print("❌ Error: Hybrid artifacts exist but load_index() returned None")
+                print("   This indicates index corruption. Run 'make rebuild-all' to fix.")
+                sys.exit(1)
 
-    if not rag_available:
-        print("Building lexical BM25 index for evaluation...")
+            retrieval_chunks, vecs_n, bm, hnsw = result
+            retrieval_fn = lambda q: retrieve(q, retrieval_chunks, vecs_n, bm, top_k=TOP_K, hnsw=hnsw)[0]
+            rag_available = True
+            retrieval_mode = f"Hybrid (FAISS={'enabled' if faiss_available else 'disabled'})"
+            print(f"✅ Hybrid retrieval loaded successfully ({retrieval_mode})")
+
+        except Exception as exc:
+            print(f"❌ Error: Hybrid artifacts exist but failed to load hybrid index:")
+            print(f"   {exc}")
+            print("   Cannot fall back to lexical when hybrid artifacts present.")
+            print("   Fix: Run 'make rebuild-all' or remove corrupted artifacts.")
+            sys.exit(1)
+    else:
+        # No hybrid artifacts - use lexical fallback for lightweight CI
+        print("No hybrid artifacts found - using lexical BM25 fallback...")
+        print("(This is acceptable for CI; run 'make build' for full hybrid evaluation)")
         try:
             lexical_retriever = LexicalRetriever(retrieval_chunks)
             retrieval_fn = lexical_retriever.retrieve
-        except Exception as exc:  # pragma: no cover - fatal fallback error
+            retrieval_mode = "Lexical BM25 (fallback)"
+            print(f"✅ Lexical retrieval loaded successfully")
+        except Exception as exc:
             print(f"Error building lexical index: {exc}")
             sys.exit(1)
-
-    # Load index
-    print("Loading knowledge base index...")
-    try:
-        result = load_index()
-        if result is None:
-            print("Error: Failed to load index")
-            sys.exit(1)
-        chunks, vecs_n, bm, hnsw = result
-    except Exception as e:
-        print(f"Error loading index: {e}")
-        sys.exit(1)
 
     # Load evaluation dataset
     dataset = []
@@ -315,10 +331,8 @@ def evaluate(dataset_path="eval_datasets/clockify_v1.jsonl", verbose=False):
             continue
 
         try:
-            # Retrieve chunks using RAG system
+            # Retrieve chunks using configured retrieval function
             retrieved_ids = list(retrieval_fn(query)) if retrieval_fn else []
-            selected, _ = retrieve(query, chunks, vecs_n, bm, top_k=12, hnsw=hnsw)
-            retrieved_ids = list(selected)
 
             # Compute metrics
             mrr = compute_mrr(retrieved_ids, relevant_ids)
@@ -341,7 +355,7 @@ def evaluate(dataset_path="eval_datasets/clockify_v1.jsonl", verbose=False):
             print(f"Error evaluating query '{query}': {e}")
             continue
 
-    # Compute aggregate metrics
+    # Compute aggregate metrics (Priority #13: include retrieval metrics)
     results = {
         "dataset_size": len(dataset),
         "mrr_at_10": float(np.mean(mrr_scores)),
@@ -349,7 +363,13 @@ def evaluate(dataset_path="eval_datasets/clockify_v1.jsonl", verbose=False):
         "ndcg_at_10": float(np.mean(ndcg_at_10_scores)),
         "mrr_std": float(np.std(mrr_scores)),
         "precision_std": float(np.std(precision_at_5_scores)),
-        "ndcg_std": float(np.std(ndcg_at_10_scores))
+        "ndcg_std": float(np.std(ndcg_at_10_scores)),
+        # Retrieval system metrics (Priority #13)
+        "retrieval_mode": retrieval_mode,
+        "hybrid_available": rag_available,
+        "faiss_enabled": faiss_available,
+        "queries_processed": len(mrr_scores),
+        "queries_skipped": skipped,
     }
 
     # Print results
@@ -359,12 +379,17 @@ def evaluate(dataset_path="eval_datasets/clockify_v1.jsonl", verbose=False):
         sys.exit(1)
 
     print("\n" + "="*70)
-    mode = "Hybrid RAG" if rag_available else "Lexical BM25"
-    print(f"RAG EVALUATION RESULTS ({mode})")
+    print(f"RAG EVALUATION RESULTS")
     print("="*70)
+    print(f"Retrieval Mode:  {results['retrieval_mode']}")
+    if results['hybrid_available']:
+        ann_status = "✅ FAISS enabled" if results['faiss_enabled'] else "⚠️  FAISS disabled (full-scan)"
+        print(f"ANN Index:       {ann_status}")
     print(f"Dataset size:    {results['dataset_size']}")
+    print(f"Queries eval:    {results['queries_processed']}")
     if skipped:
         print(f"Skipped queries: {skipped} (missing relevance annotations)")
+    print("-"*70)
     print(f"MRR@10:          {results['mrr_at_10']:.3f} (±{results['mrr_std']:.3f})")
     print(f"Precision@5:     {results['precision_at_5']:.3f} (±{results['precision_std']:.3f})")
     print(f"NDCG@10:         {results['ndcg_at_10']:.3f} (±{results['ndcg_std']:.3f})")
