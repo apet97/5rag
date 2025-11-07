@@ -9,7 +9,24 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import clockify_support_cli_final as cli
 from clockify_support_cli_final import retrieve, normalize_scores_zscore, sanitize_question, DenseScoreStore
 
+# Check if Ollama is available (may not be in CI)
+def is_ollama_available():
+    """Check if Ollama service is running and accessible."""
+    try:
+        import requests
+        response = requests.get("http://127.0.0.1:11434/api/version", timeout=1)
+        return response.ok
+    except Exception:
+        return False
 
+OLLAMA_AVAILABLE = is_ollama_available()
+requires_ollama = pytest.mark.skipif(
+    not OLLAMA_AVAILABLE,
+    reason="Ollama not running (expected in CI, start with 'ollama serve' for local testing)"
+)
+
+
+@requires_ollama
 def test_retrieve_returns_correct_top_k(sample_chunks, sample_embeddings, sample_bm25):
     """Verify retrieval returns exactly top_k results."""
     question = "How do I track time?"
@@ -22,6 +39,7 @@ def test_retrieve_returns_correct_top_k(sample_chunks, sample_embeddings, sample
     assert all(0 <= idx < len(sample_chunks) for idx in selected), "Indices should be valid"
 
 
+@requires_ollama
 def test_retrieve_with_different_top_k_values(sample_chunks, sample_embeddings, sample_bm25):
     """Test retrieval with various top_k values."""
     question = "time tracking features"
@@ -38,6 +56,7 @@ def test_retrieve_with_empty_query_raises_error(sample_chunks, sample_embeddings
         sanitize_question("")
 
 
+@requires_ollama
 def test_retrieve_scores_structure(sample_chunks, sample_embeddings, sample_bm25):
     """Verify scores dict has correct structure."""
     question = "pricing plans"
@@ -79,6 +98,7 @@ def test_normalize_scores_zscore_edge_cases():
     assert abs(result.std() - 1.0) < 0.01, "Std should be ~1 after normalization"
 
 
+@requires_ollama
 def test_retrieve_ranking_quality(sample_chunks, sample_embeddings, sample_bm25):
     """Test that retrieval ranks relevant chunks higher."""
     question = "How do I track time?"  # Should rank time tracking chunks higher
@@ -94,6 +114,7 @@ def test_retrieve_ranking_quality(sample_chunks, sample_embeddings, sample_bm25)
     assert len(overlap) > 0, f"Should retrieve at least one time tracking chunk, got {selected}"
 
 
+@requires_ollama
 def test_retrieve_with_long_query(sample_chunks, sample_embeddings, sample_bm25):
     """Test retrieval with a longer, more complex query."""
     question = (
@@ -128,6 +149,7 @@ def test_sanitize_question_validation():
         sanitize_question("test\x00string")  # Null byte
 
 
+@requires_ollama
 def test_retrieve_deduplication(sample_chunks, sample_embeddings, sample_bm25):
     """Test that retrieval doesn't return duplicate indices."""
     question = "time tracking"
@@ -138,6 +160,7 @@ def test_retrieve_deduplication(sample_chunks, sample_embeddings, sample_bm25):
     assert len(selected) == len(set(selected)), "Should not return duplicate indices"
 
 
+@requires_ollama
 def test_retrieve_scores_are_numeric(sample_chunks, sample_embeddings, sample_bm25):
     """Verify all scores are valid numeric values."""
     question = "clockify features"
