@@ -7,6 +7,16 @@ import clockify_support_cli_final as cli
 def test_answer_once_logs_retrieved_chunks_with_cache(monkeypatch):
     cli.QUERY_CACHE.clear()
 
+    # Enable chunk logging for this test
+    monkeypatch.setenv("RAG_LOG_INCLUDE_CHUNKS", "1")
+
+    # Reload config to pick up env var
+    import importlib
+    import clockify_rag.config
+    importlib.reload(clockify_rag.config)
+    from clockify_rag.config import LOG_QUERY_INCLUDE_CHUNKS
+    assert LOG_QUERY_INCLUDE_CHUNKS, "Chunks should be included for this test"
+
     # Ensure rate limiter allows requests during the test
     monkeypatch.setattr(cli.RATE_LIMITER, "allow_request", lambda: True)
     monkeypatch.setattr(cli.RATE_LIMITER, "wait_time", lambda: 0)
@@ -88,7 +98,8 @@ def test_answer_once_logs_retrieved_chunks_with_cache(monkeypatch):
     chunk_entry = retrieved_chunks[0]
     assert chunk_entry["id"] == "chunk-1"
     assert chunk_entry["chunk"] == chunks[0]
-    assert chunk_entry["score"] == pytest.approx(0.9)
+    # In success path, code uses "dense" not "score"
+    assert chunk_entry["dense"] == pytest.approx(0.9)
 
     # Second call should hit the cache and avoid invoking log_query again
     cached_answer, cached_metadata = cli.answer_once(

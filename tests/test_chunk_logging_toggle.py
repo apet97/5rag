@@ -13,22 +13,23 @@ import pytest
 
 def test_chunk_logging_disabled_by_default(monkeypatch):
     """Verify that chunk text is redacted from logs by default."""
-    from clockify_rag.caching import log_query
-    from clockify_rag.config import LOG_QUERY_INCLUDE_CHUNKS
-
-    # Default should be False (redacted)
-    assert not LOG_QUERY_INCLUDE_CHUNKS, "Chunks should be redacted by default for security"
-
     with tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix='.jsonl') as f:
         log_file = f.name
 
     try:
+        # Set log file BEFORE reloading config
         monkeypatch.setenv("RAG_LOG_FILE", log_file)
 
         # Reload config to pick up env var
         import importlib
         import clockify_rag.config
         importlib.reload(clockify_rag.config)
+
+        from clockify_rag.caching import log_query
+        from clockify_rag.config import LOG_QUERY_INCLUDE_CHUNKS
+
+        # Default should be False (redacted)
+        assert not LOG_QUERY_INCLUDE_CHUNKS, "Chunks should be redacted by default for security"
 
         # Log a query with chunk data
         test_chunks = [
@@ -69,23 +70,23 @@ def test_chunk_logging_disabled_by_default(monkeypatch):
 
 def test_chunk_logging_enabled_when_flag_set(monkeypatch):
     """Verify that chunk text is included when RAG_LOG_INCLUDE_CHUNKS=1."""
-    monkeypatch.setenv("RAG_LOG_INCLUDE_CHUNKS", "1")
-
-    # Reload config to pick up env var
-    import importlib
-    import clockify_rag.config
-    importlib.reload(clockify_rag.config)
-    from clockify_rag.config import LOG_QUERY_INCLUDE_CHUNKS
-
-    assert LOG_QUERY_INCLUDE_CHUNKS, "Chunks should be included when flag is set"
-
     with tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix='.jsonl') as f:
         log_file = f.name
 
     try:
+        # Set BOTH env vars BEFORE reloading config
+        monkeypatch.setenv("RAG_LOG_INCLUDE_CHUNKS", "1")
         monkeypatch.setenv("RAG_LOG_FILE", log_file)
 
+        # Reload config to pick up env vars
+        import importlib
+        import clockify_rag.config
+        importlib.reload(clockify_rag.config)
+
         from clockify_rag.caching import log_query
+        from clockify_rag.config import LOG_QUERY_INCLUDE_CHUNKS
+
+        assert LOG_QUERY_INCLUDE_CHUNKS, "Chunks should be included when flag is set"
 
         # Log a query with chunk data
         test_chunks = [
@@ -128,26 +129,25 @@ def test_chunk_logging_enabled_when_flag_set(monkeypatch):
 
 def test_chunk_logging_independent_of_answer_logging(monkeypatch):
     """Verify chunk logging is independent of answer logging flag."""
-    # Set answer logging OFF but chunk logging ON
-    monkeypatch.setenv("RAG_LOG_INCLUDE_ANSWER", "0")
-    monkeypatch.setenv("RAG_LOG_INCLUDE_CHUNKS", "1")
-
-    # Reload config to pick up env vars
-    import importlib
-    import clockify_rag.config
-    importlib.reload(clockify_rag.config)
-    from clockify_rag.config import LOG_QUERY_INCLUDE_ANSWER, LOG_QUERY_INCLUDE_CHUNKS
-
-    assert not LOG_QUERY_INCLUDE_ANSWER, "Answer should be redacted"
-    assert LOG_QUERY_INCLUDE_CHUNKS, "Chunks should be included"
-
     with tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix='.jsonl') as f:
         log_file = f.name
 
     try:
+        # Set ALL env vars BEFORE reloading config
+        monkeypatch.setenv("RAG_LOG_INCLUDE_ANSWER", "0")
+        monkeypatch.setenv("RAG_LOG_INCLUDE_CHUNKS", "1")
         monkeypatch.setenv("RAG_LOG_FILE", log_file)
 
+        # Reload config to pick up env vars
+        import importlib
+        import clockify_rag.config
+        importlib.reload(clockify_rag.config)
+
         from clockify_rag.caching import log_query
+        from clockify_rag.config import LOG_QUERY_INCLUDE_ANSWER, LOG_QUERY_INCLUDE_CHUNKS
+
+        assert not LOG_QUERY_INCLUDE_ANSWER, "Answer should be redacted"
+        assert LOG_QUERY_INCLUDE_CHUNKS, "Chunks should be included"
 
         # Log a query with chunk data
         test_chunks = [
