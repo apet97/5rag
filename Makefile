@@ -1,4 +1,4 @@
-.PHONY: help venv install selftest build chat smoke clean dev test eval benchmark benchmark-quick typecheck lint format pre-commit-install pre-commit-run
+.PHONY: help venv install selftest build chat smoke clean dev test eval benchmark benchmark-quick typecheck lint format pre-commit-install pre-commit-run regen-artifacts
 
 help:
 	@echo "v4.1 Clockify RAG CLI - Make Targets"
@@ -7,6 +7,7 @@ help:
 	@echo "  make venv                - Create Python virtual environment"
 	@echo "  make install             - Install dependencies (requires venv)"
 	@echo "  make build               - Build knowledge base (uses local embeddings for speed)"
+	@echo "  make regen-artifacts     - Regenerate derived artifacts (chunk_title_map.json, etc.)"
 	@echo "  make selftest            - Run self-test suite"
 	@echo "  make chat                - Start interactive chat (REPL)"
 	@echo "  make smoke               - Run full smoke test suite"
@@ -52,6 +53,18 @@ build:
 	source rag_env/bin/activate && EMB_BACKEND=local python3 clockify_support_cli_final.py build knowledge_full.md
 	@echo ""
 	@echo "Hint: To use Ollama embeddings instead, run: EMB_BACKEND=ollama make build"
+
+regen-artifacts:
+	@echo "Regenerating derived artifacts..."
+	@if [ ! -f chunks.jsonl ]; then \
+		echo "Error: chunks.jsonl not found. Run 'make build' first."; \
+		exit 1; \
+	fi
+	@echo "Regenerating chunk_title_map.json..."
+	source rag_env/bin/activate && python3 scripts/generate_chunk_title_map.py
+	@echo "✅ Artifacts regenerated"
+	@echo ""
+	@echo "Note: Run this after rebuilding the knowledge base to keep chunk_title_map.json in sync"
 
 selftest:
 	@echo "Running self-test suite..."
@@ -105,7 +118,7 @@ pre-commit-run:
 clean:
 	@echo "Cleaning generated artifacts..."
 	rm -f chunks.jsonl vecs_n.npy vecs.npy meta.jsonl bm25.json index.meta.json
-	rm -f faiss.index hnsw_cosine.bin emb_cache.jsonl
+	rm -f faiss.index hnsw_cosine.bin emb_cache.jsonl chunk_title_map.json
 	rm -f .build.lock .shim.pid shim.log build.log smoke.log query.log audit.jsonl
 	rm -rf .mypy_cache .pytest_cache htmlcov .ruff_cache
 	@echo "✅ Clean complete"
