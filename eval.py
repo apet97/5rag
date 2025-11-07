@@ -271,7 +271,9 @@ def evaluate(dataset_path="eval_datasets/clockify_v1.jsonl", verbose=False):
         # Hybrid artifacts exist - MUST use hybrid path (Priority #4)
         print("Hybrid artifacts detected - requiring hybrid retrieval path...")
         try:
-            from clockify_support_cli_final import load_index, retrieve
+            # Priority #12: Use modular retrieval from clockify_rag package
+            from clockify_rag.retrieval import retrieve
+            from clockify_rag.indexing import load_index
 
             print("Loading knowledge base index...")
             result = load_index()
@@ -281,7 +283,8 @@ def evaluate(dataset_path="eval_datasets/clockify_v1.jsonl", verbose=False):
                 sys.exit(1)
 
             retrieval_chunks, vecs_n, bm, hnsw = result
-            retrieval_fn = lambda q: retrieve(q, retrieval_chunks, vecs_n, bm, top_k=TOP_K, hnsw=hnsw)[0]
+            faiss_index_path = "faiss.index" if faiss_available else None
+            retrieval_fn = lambda q: retrieve(q, retrieval_chunks, vecs_n, bm, top_k=TOP_K, hnsw=hnsw, faiss_index_path=faiss_index_path)[0]
             rag_available = True
             retrieval_mode = f"Hybrid (FAISS={'enabled' if faiss_available else 'disabled'})"
             print(f"✅ Hybrid retrieval loaded successfully ({retrieval_mode})")

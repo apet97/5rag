@@ -2,11 +2,12 @@
 """
 DeepSeek → Ollama Shim with Rate Limiting & Audit Logging (Rank 13)
 """
-import os, json, time, ssl, sys
+import os, json, time, ssl, sys, logging
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.request import Request, urlopen
 from urllib.error import URLError
 from collections import deque
+from logging.handlers import RotatingFileHandler
 
 API_BASE     = os.environ.get("DEEPSEEK_API_BASE", "https://api.deepseek.com/v1")
 API_KEY      = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("OPENAI_API_KEY")
@@ -27,6 +28,8 @@ if not API_KEY:
 RATE_LIMIT_MAX = int(os.environ.get("RATE_LIMIT_MAX", "60"))
 RATE_LIMIT_WINDOW = int(os.environ.get("RATE_LIMIT_WINDOW", "60"))
 AUDIT_LOG_FILE = os.environ.get("AUDIT_LOG_FILE", "deepseek_audit.jsonl")
+AUDIT_LOG_MAX_BYTES = int(os.environ.get("AUDIT_LOG_MAX_BYTES", str(10 * 1024 * 1024)))  # 10 MB default
+AUDIT_LOG_BACKUP_COUNT = int(os.environ.get("AUDIT_LOG_BACKUP_COUNT", "5"))  # Keep 5 backups
 
 class SimpleRateLimiter:
     """Token bucket rate limiter (Rank 13)."""
@@ -56,8 +59,21 @@ class SimpleRateLimiter:
 
 RATE_LIMITER = SimpleRateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW)
 
+# Set up rotating audit logger (Priority #18: prevent unbounded log growth)
+audit_logger = logging.getLogger("audit")
+audit_logger.setLevel(logging.INFO)
+audit_handler = RotatingFileHandler(
+    AUDIT_LOG_FILE,
+    maxBytes=AUDIT_LOG_MAX_BYTES,
+    backupCount=AUDIT_LOG_BACKUP_COUNT,
+    encoding="utf-8"
+)
+audit_handler.setFormatter(logging.Formatter("%(message)s"))
+audit_logger.addHandler(audit_handler)
+audit_logger.propagate = False  # Don't propagate to root logger
+
 def audit_log(event, client_ip, details=None):
-    """Log security events (Rank 13)."""
+    """Log security events with automatic rotation (Priority #18)."""
     try:
         log_entry = {
             "timestamp": time.time(),
@@ -66,8 +82,7 @@ def audit_log(event, client_ip, details=None):
             "client_ip": client_ip,
             "details": details or {}
         }
-        with open(AUDIT_LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(json.dumps(log_entry) + "\n")
+        audit_logger.info(json.dumps(log_entry))
     except Exception as e:
         print(f"[shim] ⚠️  Audit log failed: {e}", file=sys.stderr)
 

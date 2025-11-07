@@ -67,6 +67,22 @@ from .caching import (
     get_rate_limiter
 )
 
+# Retrieval
+from .retrieval import (
+    expand_query,
+    embed_query,
+    normalize_scores_zscore,
+    DenseScoreStore,
+    retrieve,
+    rerank_with_llm,
+    pack_snippets,
+    coverage_ok,
+    ask_llm,
+    tokenize,
+    count_tokens,
+    truncate_to_token_budget,
+)
+
 __all__ = [
     # Version
     "__version__",
@@ -86,4 +102,9 @@ __all__ = [
     "build", "load_index", "build_bm25", "bm25_scores", "build_faiss_index",
     # Caching
     "QueryCache", "RateLimiter", "get_query_cache", "get_rate_limiter",
+    # Retrieval
+    "expand_query", "embed_query", "normalize_scores_zscore",
+    "DenseScoreStore", "retrieve", "rerank_with_llm",
+    "pack_snippets", "coverage_ok", "ask_llm",
+    "tokenize", "count_tokens", "truncate_to_token_budget",
 ]

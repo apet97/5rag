@@ -1,252 +1,317 @@
-# Clockify RAG CLI - Quick Start Guide
+# Clockify RAG CLI – Quick Start Guide
 
-## One-Time Setup
+**Version**: 5.5 | **Status**: ✅ Production Ready
 
-### 1. Install Dependencies
+> **Priority #20**: Single authoritative quickstart (consolidated from multiple guides)
 
-The tool requires Python 3.7+ and a few packages. A virtual environment has already been created in `rag_env/`.
+This guide gets you up and running with the Clockify Support CLI in 5-10 minutes.
 
-Activate the environment (MacOS/Linux):
+---
+
+## Prerequisites
+
+- Python 3.7+ installed
+- [Ollama](https://ollama.ai) running locally at `http://127.0.0.1:11434`
+
+---
+
+## Installation
+
+### Option 1: Standard Setup (Linux, macOS Intel, WSL2)
+
 ```bash
+# Clone or navigate to project directory
+cd /path/to/1rag
+
+# Create virtual environment
+python3 -m venv rag_env
 source rag_env/bin/activate
+
+# Install dependencies
+pip install -r requirements.txt
 ```
 
-Windows:
+### Option 2: Apple Silicon (M1/M2/M3) – Recommended
+
+For best FAISS compatibility on Apple Silicon, use conda:
+
 ```bash
-rag_env\Scripts\activate
+# Create conda environment
+conda create -n rag_env python=3.11
+conda activate rag_env
+
+# Install FAISS and dependencies
+conda install -c conda-forge faiss-cpu=1.8.0 numpy requests
+conda install -c pytorch sentence-transformers pytorch
+pip install urllib3==2.2.3 rank-bm25==0.2.2
 ```
 
-Dependencies are already installed: `requests`, `numpy`.
+> **Note**: See [M1_COMPATIBILITY.md](M1_COMPATIBILITY.md) for detailed Apple Silicon instructions and troubleshooting.
 
-### 2. Start Ollama Server
+---
 
-Ensure Ollama is running locally (default: `http://10.127.0.192:11434`):
+## Setup Ollama
+
+Ensure Ollama is running and has the required models:
 
 ```bash
+# Start Ollama server (in separate terminal)
 ollama serve
-```
 
-Verify the required models are available:
-```bash
-ollama list
-```
+# Verify Ollama is accessible
+curl http://127.0.0.1:11434/api/version
 
-If missing, pull them:
-```bash
-ollama pull nomic-embed-text
-ollama pull qwen2.5:32b
+# Pull required models
+ollama pull nomic-embed-text    # For embeddings (768-dim)
+ollama pull qwen2.5:32b          # For answer generation
 ```
 
 ---
 
-## Building the Knowledge Base (One-Time)
+## Build Knowledge Base (One-Time)
 
-The production CLI handles chunking and embedding in a single build step. Run this after activating the virtual environment:
-### Step 1: Build the Knowledge Base
+This step processes the Clockify documentation and creates searchable indexes (~5-10 minutes):
 
 ```bash
-source rag_env/bin/activate
+# Activate environment (if not already active)
+source rag_env/bin/activate   # or: conda activate rag_env
+
+# Build index from knowledge base
 python3 clockify_support_cli_final.py build knowledge_full.md
 ```
 
-The command validates existing artifacts, rebuilds them if needed, and creates the following files:
-
-- `chunks.jsonl` – structured document chunks
-- `vecs_n.npy` – normalized dense embeddings (float32)
-- `meta.jsonl` – metadata for each chunk
-- `bm25.json` – sparse retrieval index for keyword matching
-- `index.meta.json` – build metadata (used for automatic rebuild detection)
-The `build` command chunks the Markdown, generates dense embeddings, constructs the BM25 index, and writes out FAISS artifacts in one pass.
-
-**Expected output:**
+**Expected output**:
 ```
+======================================================================
 BUILDING KNOWLEDGE BASE
+======================================================================
+
 [1/4] Parsing and chunking...
-[2/4] Embedding with Ollama...
+  Created 1247 chunks
+
+[2/4] Embedding with local (backend=local)...
+  Cache: 0/1247 hits (0.0%)
+  Computing 1247 new embeddings...
+  Progress: ████████████████████ 100%
+  Saved (1247, 768) embeddings (normalized)
+
 [3/4] Building BM25 index...
-[4/4] Done.
+  Indexed 12840 unique terms
+
+[4/4] Building FAISS index...
+  Training IVF clusters...
+  FAISS index saved: faiss.index
+
+======================================================================
+BUILD COMPLETE
+======================================================================
+Generated files:
+  - chunks.jsonl (1247 chunks)
+  - vecs_n.npy (normalized embeddings)
+  - bm25.json (keyword index)
+  - faiss.index (approximate nearest neighbor index)
+  - meta.jsonl (chunk metadata)
+  - emb_cache.jsonl (embedding cache for incremental builds)
 ```
 
-The initial build can take several minutes depending on hardware; subsequent runs are faster thanks to incremental rebuild checks.
+> **Note**: Subsequent builds are faster thanks to embedding cache (only re-processes changed chunks).
 
 ---
 
-## Using the Tool (Repeatable)
+## Run the Application
 
-### Start the Interactive Chat
-
-After the build completes, launch the REPL interface:
+### Interactive REPL (Recommended)
 
 ```bash
-source rag_env/bin/activate
 python3 clockify_support_cli_final.py chat
 ```
 
-The chat loop keeps the index in memory and lets you ask follow-up questions. Toggle diagnostics at any time with the `:debug` command.
+**REPL commands**:
+- Type questions naturally, press Enter
+- `:exit` – quit the REPL
+- `:debug` – toggle debug mode (shows retrieval details)
+- `:help` – show available commands
 
-### Run a Single Query
-python3 clockify_support_cli_final.py ask "How do I track time in Clockify?" --rerank --json
+**Example session**:
+```
+Clockify Support CLI v5.5 - Type :exit to quit, :debug for diagnostics
+
+> How do I track time in Clockify?
+
+To track time in Clockify, you have two main options:
+
+1. **Timer**: Click the timer button in the top right corner to start tracking time in real-time
+2. **Manual entry**: Add time entries afterward using the manual time entry form
+
+You can track time in the web app, desktop app, mobile app, or browser extension.
+
+Citations: [id_45, id_67, id_89]
+
+> :exit
+Goodbye!
 ```
 
-The `ask` command accepts all retrieval knobs (`--topk`, `--pack`, `--threshold`, `--rerank`) and `--json` for structured output, so it fits neatly into scripts or automation.
-
-**Example Response:**
-```
-You can track time in Clockify by [15, 23]:
-- Using the Timer button to start/stop tracking in real-time
-- Manually entering time entries with custom dates and durations
-- Integrating with third-party apps like Google Calendar, Slack, or Jira
-```
-
-Use the `ask` subcommand for one-off questions without entering the REPL:
+### Single Query Mode
 
 ```bash
-python3 clockify_support_cli_final.py ask "How do I track time in Clockify?"
+# Ask a single question
+python3 clockify_support_cli_final.py ask "How do I track time?"
+
+# With additional options
+python3 clockify_support_cli_final.py ask "What are the pricing plans?" \
+  --rerank \      # Use LLM-based reranking
+  --json \        # Output as JSON
+  --topk 15 \     # Retrieve more candidates
+  --pack 8        # Include more snippets in context
 ```
 
-Add `--json` for structured output that includes the selected chunk IDs and token usage:
+### Debug Mode
 
 ```bash
-python3 clockify_support_cli_final.py ask "How do I track time in Clockify?" --json
+# Start REPL with debug mode enabled
+python3 clockify_support_cli_final.py chat --debug
+
+# Or toggle debug during session
+> :debug
+Debug mode: ON
+```
+
+Debug mode shows:
+- Retrieved chunk IDs and scores
+- Dense, BM25, and hybrid scores
+- MMR diversification results
+- Token usage and performance metrics
+
+---
+
+## Configuration
+
+### Environment Variables
+
+Common configuration options:
+
+```bash
+# Ollama endpoint (if running remotely)
+export OLLAMA_URL="http://10.0.0.5:11434"
+
+# Model selection
+export GEN_MODEL="qwen2.5:32b"        # Answer generation
+export EMB_MODEL="nomic-embed-text"   # Embeddings
+
+# Retrieval tuning
+export ALPHA="0.5"                    # BM25/dense blend (0=dense, 1=BM25)
+export CTX_BUDGET="2800"              # Token budget for context
+
+# Embedding backend
+export EMB_BACKEND="local"            # "local" or "ollama"
+
+# Performance
+export ANN="faiss"                    # "faiss" or "none"
+export ANN_NLIST="64"                 # FAISS IVF clusters
+export ANN_NPROBE="16"                # FAISS search clusters
+
+# Privacy
+export RAG_NO_LOG="1"                 # Disable query logging
+export RAG_LOG_INCLUDE_ANSWER="0"    # Redact answers from logs
+```
+
+### Tuning Retrieval Parameters
+
+Adjust retrieval behavior via command-line flags:
+
+```bash
+# Retrieve more candidates (default: 12)
+python3 clockify_support_cli_final.py chat --topk 20
+
+# Include more snippets in context (default: 6)
+python3 clockify_support_cli_final.py chat --pack 10
+
+# Adjust similarity threshold (default: 0.30)
+python3 clockify_support_cli_final.py chat --threshold 0.40
+
+# Enable LLM-based reranking (slower, higher quality)
+python3 clockify_support_cli_final.py chat --rerank
 ```
 
 ---
 
-## Example Queries
+## Verification
 
-Try these questions to test the system:
+Run self-tests to verify installation:
 
 ```bash
-python3 clockify_support_cli_final.py ask "What is time rounding in Clockify?"
-python3 clockify_support_cli_final.py ask "How do I set up projects?"
-python3 clockify_support_cli_final.py ask "Can I track time offline?"
-python3 clockify_support_cli_final.py ask "How do I export reports?"
-python3 clockify_support_cli_final.py ask "How do I set up projects?" --topk 16 --pack 8
-python3 clockify_support_cli_final.py ask "Can I track time offline?" --rerank
-python3 clockify_support_cli_final.py ask "How do I export reports?" --json
-python3 clockify_support_cli_final.py ask "What billing modes does Clockify support?"
+python3 clockify_support_cli_final.py --selftest
 ```
 
----
+Run evaluation suite (requires eval dataset):
 
-## File Structure
+```bash
+# Run full evaluation
+./eval.py --verbose
 
-After setup, your directory contains:
-
-```
-/Users/15x/Downloads/KBDOC/
-├── clockify_support_cli_final.py  # Main CLI tool (build/chat/ask)
-├── rag_env/                  # Virtual environment (activate with: source rag_env/bin/activate)
-├── knowledge_full.md         # Source documentation (6.9 MB)
-├── chunks.jsonl              # Generated: documentation chunks
-├── vecs_n.npy                # Generated: normalized embedding vectors
-├── meta.jsonl                # Generated: chunk metadata
-├── README_RAG.md             # Full documentation
-└── QUICKSTART.md             # This file
-├── clockify_support_cli_final.py   # Main CLI tool
-├── rag_env/                        # Virtual environment (activate with: source rag_env/bin/activate)
-├── knowledge_full.md               # Source documentation (6.9 MB)
-├── chunks.jsonl                    # Generated: documentation chunks
-├── vecs_n.npy                      # Generated: normalized embedding vectors
-├── meta.jsonl                      # Generated: chunk metadata
-├── bm25.json                       # Generated: sparse index
-├── faiss.index                     # Generated: ANN index (if enabled)
-├── README_RAG.md                   # Full documentation
-└── QUICKSTART.md                   # This file
+# Quick evaluation (lexical fallback if no index)
+./eval.py
 ```
 
 ---
 
 ## Troubleshooting
 
-### Connection Error: "Cannot connect to Ollama"
+### Connection Errors
 
-```
-Embedding request failed for chunk 0: Connection refused
-```
+**Problem**: `Connection refused` or `EmbeddingError`
 
-**Solution**: Ensure Ollama is running:
-```bash
-ollama serve
-```
+**Solution**:
+1. Verify Ollama is running: `curl http://127.0.0.1:11434/api/version`
+2. Check model availability: `ollama list`
+3. Pull missing models: `ollama pull nomic-embed-text`
 
-Check the `OLLAMA_URL` environment variable or override with `--ollama-url` when running the CLI.
-Check the URL in `clockify_support_cli_final.py` (line 11) matches your Ollama instance.
+### Build Fails
 
-### Model Not Found
+**Problem**: Build crashes or hangs
 
-```
-Embedding API returned error 404
-```
+**Solution**:
+1. Remove lock file: `rm .build.lock`
+2. Clear corrupted artifacts: `rm -f chunks.jsonl vecs_n.npy bm25.json faiss.index`
+3. Rebuild: `python3 clockify_support_cli_final.py build knowledge_full.md`
 
-**Solution**: Pull the missing model:
-```bash
-ollama pull nomic-embed-text
-ollama pull qwen2.5:32b
-```
+### Apple Silicon Issues
 
-### Memory Issues
+**Problem**: Segmentation fault or FAISS errors on M1/M2/M3
 
-If you run out of memory during embedding:
-- Reduce `CHUNK_SIZE` in `clockify_support_cli_final.py` (defaults to 1600)
-- Reduce `CHUNK_SIZE` in `clockify_support_cli_final.py` (currently 1600)
-- Ensure you have at least 8GB RAM available
-- Close other applications
+**Solution**: See [M1_COMPATIBILITY.md](M1_COMPATIBILITY.md) for:
+- Conda-based installation (recommended)
+- FAISS fallback to FlatIP
+- PyTorch MPS acceleration
 
-### Slow Responses
+### Poor Answer Quality
 
-First-time queries may be slow as models load. Subsequent queries are faster.
+**Problem**: Answers are inaccurate or incomplete
 
----
-
-## How It Works
-
-1. **Build**: `clockify_support_cli_final.py build` chunks `knowledge_full.md` (1600 char max with 200-char overlap)
-2. **Embed**: Dense vectors are generated via Ollama (`nomic-embed-text`) or the local backend
-3. **Index**: BM25 and optional FAISS indices are stored for fast retrieval
-4. **Retrieve**: Each `ask`/`chat` query scores BM25 + dense similarities with hybrid weighting
-5. **Rerank (optional)**: `--rerank` performs an LLM rerank pass for higher precision
-6. **Answer**: Top snippets are packed and sent to `qwen2.5:32b`; the CLI refuses when coverage is insufficient
+**Solution**:
+1. Enable debug mode to inspect retrieved chunks: `--debug`
+2. Increase candidates: `--topk 20`
+3. Adjust BM25/dense blend: `export ALPHA="0.3"` (more semantic) or `export ALPHA="0.7"` (more keyword-based)
+4. Enable reranking: `--rerank`
 
 ---
 
-## More Information
+## Next Steps
 
-See `README_RAG.md` for:
-- Detailed architecture explanation
-- Advanced configuration options
-- Customization examples
-- Performance optimization tips
-- Known limitations & future improvements
+- **Production Deployment**: See [CLAUDE.md](CLAUDE.md) for thread-safety, caching, and deployment options
+- **Architecture Details**: See [PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md) for codebase organization
+- **API Integration**: Import `clockify_rag` package for programmatic access
+- **Customization**: Edit `config/query_expansions.json` for domain-specific synonyms
 
 ---
 
-## Quick Command Reference
+## Support
 
-```bash
-# Activate environment
-source rag_env/bin/activate
-
-# Run setup (one-time)
-python3 clockify_support_cli_final.py build knowledge_full.md
-
-# Ask questions (repeatable)
-python3 clockify_support_cli_final.py ask "Your question here"
-
-# Interactive mode
-python3 clockify_support_cli_final.py chat
-python3 clockify_support_cli_final.py build knowledge_full.md   # Build retrieval artifacts
-
-# Ask questions (repeatable)
-python3 clockify_support_cli_final.py ask "Your question here" --rerank --json
-
-# Interactive mode
-python3 clockify_support_cli_final.py chat --debug
-
-# Help
-python3 clockify_support_cli_final.py --help
-```
+For issues, questions, or contributions:
+- Check [CLAUDE.md](CLAUDE.md) for detailed architecture documentation
+- Review [VERSION_COMPARISON.md](VERSION_COMPARISON.md) for v1.0 vs v2.0 differences
+- See [CI_CD_M1_RECOMMENDATIONS.md](CI_CD_M1_RECOMMENDATIONS.md) for CI/CD setup
 
 ---
 
-**Happy querying!** 🚀
+**Last Updated**: 2025-11-07 | **Version**: 5.5
