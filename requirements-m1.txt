@@ -41,8 +41,8 @@
 # Step 4: Install PyTorch with MPS support (Apple GPU acceleration)
 # conda install -c pytorch pytorch
 
-# Step 5: Install SentenceTransformers
-# conda install -c pytorch sentence-transformers
+# Step 5: Install SentenceTransformers (from conda-forge, NOT pytorch channel!)
+# conda install -c conda-forge sentence-transformers
 
 # Step 6: Install remaining packages via pip
 # pip install urllib3==2.2.3
@@ -143,7 +143,7 @@
 
 # For copy-paste convenience (after creating conda environment):
 #
-# conda install -c conda-forge faiss-cpu=1.8.0 numpy requests && conda install -c pytorch pytorch sentence-transformers && pip install urllib3==2.2.3 rank-bm25==0.2.2
+# conda install -c conda-forge faiss-cpu=1.8.0 numpy requests && conda install -c pytorch pytorch && conda install -c conda-forge sentence-transformers && pip install urllib3==2.2.3 rank-bm25==0.2.2
 #
 # Verify:
 # python3 -c "import numpy, requests, sentence_transformers, torch, rank_bm25, faiss; print('✅ All dependencies OK')"

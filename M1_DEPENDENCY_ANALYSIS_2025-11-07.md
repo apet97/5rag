@@ -180,9 +180,10 @@ conda init
 conda create -n rag_env python=3.11
 conda activate rag_env
 
-# 3. Install dependencies (ONE-LINE)
+# 3. Install dependencies (ONE-LINE - CORRECTED)
 conda install -c conda-forge faiss-cpu=1.8.0 numpy requests && \
-conda install -c pytorch pytorch sentence-transformers && \
+conda install -c pytorch pytorch && \
+conda install -c conda-forge sentence-transformers && \
 pip install urllib3==2.2.3 rank-bm25==0.2.2 tiktoken nltk
 
 # 4. Verify installation
@@ -225,7 +226,8 @@ source ~/.zshrc && \
 conda create -n rag_env python=3.11 -y && \
 conda activate rag_env && \
 conda install -c conda-forge faiss-cpu=1.8.0 numpy requests -y && \
-conda install -c pytorch pytorch sentence-transformers -y && \
+conda install -c pytorch pytorch -y && \
+conda install -c conda-forge sentence-transformers -y && \
 pip install urllib3==2.2.3 rank-bm25==0.2.2 tiktoken nltk && \
 echo "✅ Installation complete! Verifying..." && \
 python3 -c "import numpy, requests, sentence_transformers, torch, rank_bm25, faiss, nltk; print('✅ All dependencies OK')" && \
@@ -668,9 +670,10 @@ brew install miniforge
 conda create -n rag_env python=3.11
 conda activate rag_env
 
-# 2. Install with one command
+# 2. Install with one command (CORRECTED)
 conda install -c conda-forge faiss-cpu=1.8.0 numpy requests -y && \
-conda install -c pytorch pytorch sentence-transformers -y && \
+conda install -c pytorch pytorch -y && \
+conda install -c conda-forge sentence-transformers -y && \
 pip install urllib3 rank-bm25 tiktoken nltk
 
 # 3. Verify
