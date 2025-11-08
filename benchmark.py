@@ -360,7 +360,15 @@ def main():
         print("❌ Failed to load index. Run 'make build' first.")
         sys.exit(1)
 
-    chunks, vecs_n, bm, hnsw = result
+    # Handle new dict return format from load_index()
+    if isinstance(result, dict):
+        chunks = result["chunks"]
+        vecs_n = result["vecs_n"]
+        bm = result["bm"]
+        hnsw = result.get("faiss_index")  # May be None
+    else:
+        # Legacy tuple format (backward compatibility)
+        chunks, vecs_n, bm, hnsw = result
     print(f"✅ Loaded {len(chunks)} chunks")
     print()
 
