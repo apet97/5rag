@@ -19,6 +19,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Sequence, Set, Tuple
 
+# OPTIMIZATION (Analysis Section 10.3 #3): Import tokenize from utils to consolidate
+from clockify_rag.utils import tokenize
+
 # Basic English stop words to avoid noisy matches in keyword heuristics.
 STOPWORDS: Set[str] = {
     "the",
@@ -104,7 +107,6 @@ STOPWORDS: Set[str] = {
     "etc",
     "etcetera",
 }
-TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 
 @dataclass
@@ -147,10 +149,6 @@ class ChunkRecord:
         if not body:
             body = "(no text)"
         return textwrap.shorten(body, width=width, placeholder="…")
-
-
-def tokenize(text: str) -> List[str]:
-    return TOKEN_RE.findall(text.lower())
 
 
 def load_jsonl(path: Path) -> List[Dict[str, object]]:

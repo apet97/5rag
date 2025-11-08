@@ -37,6 +37,7 @@ from .retrieval import (
     ask_llm,
 )
 from .exceptions import LLMError
+from .confidence_routing import get_routing_action
 
 logger = logging.getLogger(__name__)
 
@@ -387,9 +388,14 @@ def answer_once(
 
     total_time = time.time() - t_start
 
+    # OPTIMIZATION (Analysis Section 9.1 #4): Confidence-based routing
+    # Auto-escalate low-confidence queries to human review
+    refused = (answer == REFUSAL_STR)
+    routing = get_routing_action(confidence, refused=refused, critical=False)
+
     return {
         "answer": answer,
-        "refused": (answer == REFUSAL_STR),
+        "refused": refused,
         "confidence": confidence,
         "selected_chunks": selected,
         "packed_chunks": mmr_selected,
@@ -407,7 +413,8 @@ def answer_once(
             "used_tokens": used_tokens,
             "rerank_applied": rerank_applied,
             "rerank_reason": rerank_reason,
-        }
+        },
+        "routing": routing  # Add routing recommendation
     }
 
 

@@ -631,3 +631,99 @@ def sanitize_question(q: str, max_length: int = 2000) -> str:
             raise ValueError(f"Question contains suspicious pattern: {pattern}")
 
     return q
+
+
+# ====== ENHANCED STRUCTURED LOGGING (Analysis Section 10.1) ======
+def log_query_metrics(
+    question: str,
+    answer: str,
+    confidence: Optional[int],
+    timing: Dict[str, float],
+    metadata: Dict[str, Any],
+    routing: Optional[Dict[str, Any]] = None
+) -> None:
+    """Log structured query metrics for monitoring dashboard.
+
+    OPTIMIZATION (Analysis Section 10.1): Enhanced structured logging for monitoring.
+    Provides comprehensive metrics in JSON format for dashboard integration.
+
+    Args:
+        question: User question
+        answer: Generated answer
+        confidence: Confidence score (0-100) or None
+        timing: Timing breakdown dict
+        metadata: Query metadata
+        routing: Confidence routing metadata (optional)
+    """
+    import datetime
+
+    # Extract routing info if available
+    routing_action = "unknown"
+    routing_level = "unknown"
+    escalated = False
+    if routing:
+        routing_action = routing.get("action", "unknown")
+        routing_level = routing.get("level", "unknown")
+        escalated = routing.get("escalated", False)
+
+    from .config import REFUSAL_STR
+
+    log_entry = {
+        "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+        "event": "query_processed",
+        "question_length": len(question),
+        "question_preview": question[:100],
+        "answer_length": len(answer),
+        "refused": (answer == REFUSAL_STR),
+        "confidence": confidence,
+        "timing_ms": {
+            "total": timing.get("total_ms", 0),
+            "retrieve": timing.get("retrieve_ms", 0),
+            "mmr": timing.get("mmr_ms", 0),
+            "rerank": timing.get("rerank_ms", 0),
+            "llm": timing.get("llm_ms", 0),
+        },
+        "retrieval": {
+            "count": metadata.get("retrieval_count", 0),
+            "packed": metadata.get("packed_count", 0),
+            "tokens_used": metadata.get("used_tokens", 0),
+            "rerank_applied": metadata.get("rerank_applied", False),
+        },
+        "routing": {
+            "action": routing_action,
+            "level": routing_level,
+            "escalated": escalated,
+        }
+    }
+
+    logger.info(json.dumps(log_entry))
+
+
+def log_performance_metrics(
+    operation: str,
+    duration_ms: float,
+    success: bool,
+    metadata: Optional[Dict[str, Any]] = None
+) -> None:
+    """Log performance metrics for operations.
+
+    Args:
+        operation: Operation name (e.g., "build_index", "retrieve", "embed")
+        duration_ms: Operation duration in milliseconds
+        success: Whether operation succeeded
+        metadata: Additional metadata (optional)
+    """
+    import datetime
+
+    log_entry = {
+        "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+        "event": "performance_metric",
+        "operation": operation,
+        "duration_ms": duration_ms,
+        "success": success,
+    }
+
+    if metadata:
+        log_entry["metadata"] = metadata
+
+    logger.info(json.dumps(log_entry))

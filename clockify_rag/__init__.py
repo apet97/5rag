@@ -106,6 +106,19 @@ from .answer import (
     answer_once,
 )
 
+# Confidence routing (Analysis Section 9.1 #4)
+from .confidence_routing import (
+    ConfidenceLevel,
+    classify_confidence,
+    should_escalate,
+    get_routing_action,
+    log_routing_decision,
+    CONFIDENCE_HIGH,
+    CONFIDENCE_GOOD,
+    CONFIDENCE_MEDIUM,
+    CONFIDENCE_ESCALATE,
+)
+
 __all__ = [
     # Version
     "__version__",
@@ -138,4 +151,8 @@ __all__ = [
     "apply_mmr_diversification", "apply_reranking",
     "extract_citations", "validate_citations",
     "generate_llm_answer", "answer_once",
+    # Confidence routing
+    "ConfidenceLevel", "classify_confidence", "should_escalate",
+    "get_routing_action", "log_routing_decision",
+    "CONFIDENCE_HIGH", "CONFIDENCE_GOOD", "CONFIDENCE_MEDIUM", "CONFIDENCE_ESCALATE",
 ]

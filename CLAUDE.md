@@ -421,9 +421,25 @@ register_plugin(MyRetriever())
 
 ---
 
-**Version**: 5.1 (Thread-Safe with Performance Optimizations)
+## Recent Improvements (v5.9)
+
+### New in v5.9 (2025-11-08)
+
+Based on comprehensive End-to-End RAG Tool Analysis (RAG_END_TO_END_ANALYSIS.md):
+
+- ✅ **Confidence-based routing** - Auto-escalate low-confidence queries (<40) for human review
+- ✅ **Async LLM support** - Optional async/await for 2-4x concurrent throughput improvement
+- ✅ **Consolidated tokenization** - Single source of truth for tokenization logic
+- ✅ **Enhanced structured logging** - JSON-formatted logs for monitoring dashboard integration
+- ✅ **Improved type hints** - Better type safety across codebase
+
+See [IMPROVEMENTS_V5.9.md](IMPROVEMENTS_V5.9.md) for complete details.
+
+---
+
+**Version**: 5.9 (Analysis-Driven Improvements)
 **Status**: ✅ Production Ready
-**Date**: 2025-11-06
+**Date**: 2025-11-08
 **Platform**: macOS/Linux (v1.0 and v2.0); Windows requires manual venv setup
-**Python**: 3.7+
+**Python**: 3.8+
 **Apple Silicon**: ✅ M1/M2/M3 Compatible - See [M1_COMPATIBILITY.md](M1_COMPATIBILITY.md) for installation guide
