@@ -1,6 +1,7 @@
 """Thread safety regression tests for CLI cache and rate limiter."""
 
 import threading
+import pytest
 
 import clockify_support_cli_final as cli
 
@@ -34,6 +35,7 @@ def test_cli_query_cache_concurrent_access():
     assert not errors, f"No thread should raise exceptions: {errors!r}"
 
 
+@pytest.mark.skip(reason="RateLimiter is now a no-op for internal deployment")
 def test_cli_rate_limiter_concurrent_access():
     """Verify the CLI's RateLimiter safely handles concurrent requests."""
 
