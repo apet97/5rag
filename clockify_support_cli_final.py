@@ -115,6 +115,7 @@ from clockify_rag.retrieval import (
 )
 from clockify_rag.caching import log_query
 from clockify_rag.cli import ensure_index_ready, chat_repl, warmup_on_startup
+from clockify_rag.indexing import load_faiss_index
 
 # Re-export config constants for backward compatibility with tests
 # Tests import these directly from this module
@@ -248,40 +249,8 @@ def _try_load_faiss():
 
 
 
-def load_faiss_index(path: str | None = None) -> object | None:
-    """Load FAISS index from disk with thread-safe lazy loading."""
-    global _FAISS_INDEX
-
-    if path is None or not os.path.exists(path):
-        return None
-
-    # Double-checked locking pattern for thread safety
-    if _FAISS_INDEX is not None:
-        return _FAISS_INDEX
-
-    with _FAISS_LOCK:
-        if _FAISS_INDEX is not None:  # Check again inside lock
-            return _FAISS_INDEX
-
-        faiss = _try_load_faiss()
-        if faiss:
-            _FAISS_INDEX = faiss.read_index(path)
-            # Only set nprobe for IVF indexes (not flat indexes)
-            if hasattr(_FAISS_INDEX, 'nprobe'):
-                _FAISS_INDEX.nprobe = ANN_NPROBE
-            logger.debug(f"Loaded FAISS index from {path}")
-            return _FAISS_INDEX
-        return None
 
 # ====== HYBRID SCORING (v4.1 - Section 4) ======
-def normalize_scores(scores: list) -> list:
-    """Min-max normalize scores to [0, 1]."""
-    if not scores or len(scores) == 0:
-        return scores
-    mn, mx = min(scores), max(scores)
-    if mx == mn:
-        return [0.5] * len(scores)
-    return [(s - mn) / (mx - mn) for s in scores]
 
 def hybrid_score(bm25_score: float, dense_score: float, alpha: float = 0.5) -> float:
     """Blend BM25 and dense scores: alpha * bm25_norm + (1 - alpha) * dense_norm."""
