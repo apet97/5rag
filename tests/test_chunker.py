@@ -6,7 +6,8 @@ import os
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from clockify_support_cli_final import sliding_chunks, tokenize
+from clockify_rag.chunking import sliding_chunks
+from clockify_rag.utils import tokenize
 
 
 class TestChunker:

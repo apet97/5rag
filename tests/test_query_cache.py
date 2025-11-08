@@ -7,7 +7,7 @@ import time
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from clockify_support_cli_final import QueryCache
+from clockify_rag.caching import QueryCache
 
 
 class TestQueryCache:
