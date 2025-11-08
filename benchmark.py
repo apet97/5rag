@@ -27,22 +27,24 @@ from typing import Callable
 
 import numpy as np
 
-# Import module to allow monkey-patching for offline smoke tests
-import clockify_support_cli_final as rag_module
-
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from clockify_support_cli_final import (
+# Import modules to allow monkey-patching for offline smoke tests
+import clockify_rag.retrieval
+import clockify_rag.embedding
+import clockify_rag.answer
+
+from clockify_rag import (
     build_chunks,
     embed_texts,
     embed_query,
     retrieve,
     answer_once,
     load_index,
-    EMB_BACKEND,
-    RETRIEVE_PROFILE_LAST,
 )
+from clockify_rag.config import EMB_BACKEND, EMB_DIM
+from clockify_rag.retrieval import RETRIEVE_PROFILE_LAST
 
 # Allow CI smoke tests to bypass external services by providing deterministic
 # stubs when BENCHMARK_FAKE_REMOTE=1.
@@ -51,13 +53,13 @@ if os.environ.get("BENCHMARK_FAKE_REMOTE") == "1":
         """Deterministic unit-vector embedding based on question hash."""
         seed = abs(hash(question)) % (2 ** 32)
         rng = np.random.default_rng(seed)
-        vec = rng.normal(size=rag_module.EMB_DIM).astype("float32")
+        vec = rng.normal(size=EMB_DIM).astype("float32")
         norm = np.linalg.norm(vec)
         return vec if norm == 0 else vec / norm
 
     def _fake_embed_texts(texts, retries: int = 0):
         if not texts:
-            return np.zeros((0, rag_module.EMB_DIM), dtype="float32")
+            return np.zeros((0, EMB_DIM), dtype="float32")
         vecs = [_fake_embed_query(t, retries) for t in texts]
         return np.vstack(vecs).astype("float32")
 
@@ -66,7 +68,7 @@ if os.environ.get("BENCHMARK_FAKE_REMOTE") == "1":
                           hnsw=None, seed=0, num_ctx=0, num_predict=0,
                           retries=0):
         """Offline-friendly answer stub using hybrid retrieval only."""
-        selected, scores = rag_module.retrieve(
+        selected, scores = retrieve(
             question, chunks, vecs_n, bm, top_k=top_k, hnsw=hnsw, retries=retries
         )
         summary_chunks = [chunks[i]["text"] for i in selected[:1]]
@@ -80,12 +82,15 @@ if os.environ.get("BENCHMARK_FAKE_REMOTE") == "1":
         }
         return answer_text, metadata
 
-    rag_module.embed_query = _fake_embed_query
-    rag_module.embed_texts = _fake_embed_texts
-    rag_module.answer_once = _fake_answer_once
-    embed_query = rag_module.embed_query
-    embed_texts = rag_module.embed_texts
-    answer_once = rag_module.answer_once
+    # Monkey-patch the modules for offline testing
+    clockify_rag.retrieval.embed_query = _fake_embed_query
+    clockify_rag.embedding.embed_texts = _fake_embed_texts
+    clockify_rag.answer.answer_once = _fake_answer_once
+
+    # Reassign imports to use patched versions
+    embed_query = _fake_embed_query
+    embed_texts = _fake_embed_texts
+    answer_once = _fake_answer_once
 
 
 class BenchmarkResult:
