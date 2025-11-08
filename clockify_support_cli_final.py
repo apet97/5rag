@@ -64,6 +64,9 @@ from clockify_rag.retrieval import (
     coverage_ok,
     ask_llm,
     count_tokens,
+    tokenize,
+    normalize_scores_zscore,
+    DenseScoreStore,
 )
 from clockify_rag.metrics import get_metrics, time_operation
 from clockify_rag.utils import validate_ollama_url, compute_sha256
