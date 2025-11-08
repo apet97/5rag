@@ -91,7 +91,7 @@ for module in imports:
         failed.append(module)
 
 if failed:
-    print(f'\n❌ Failed to import: {', '.join(failed)}')
+    print(f\"\n❌ Failed to import: {', '.join(failed)}\")
     sys.exit(1)
 else:
     print(f'\n✓ All critical imports successful ({len(imports)} modules)')
