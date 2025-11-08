@@ -478,3 +478,156 @@ def truncate_to_token_budget(text: str, budget: int) -> str:
     if len(text) <= target_chars:
         return text
     return text[:target_chars] + " […]"
+
+
+# ====== NLTK INITIALIZATION ======
+_NLTK_AVAILABLE = False
+_NLTK_DOWNLOAD_ATTEMPTED = False
+
+def _ensure_nltk(auto_download=None):
+    """Ensure NLTK is available, with optional download control for offline environments."""
+    global _NLTK_AVAILABLE, _NLTK_DOWNLOAD_ATTEMPTED
+
+    if _NLTK_AVAILABLE:
+        return True
+
+    try:
+        import nltk
+    except ImportError:
+        logger.warning("NLTK not installed. Chunking will use simpler fallback.")
+        return False
+
+    # Check if we already have punkt
+    try:
+        nltk.data.find('tokenizers/punkt')
+        _NLTK_AVAILABLE = True
+        return True
+    except LookupError:
+        pass
+
+    # Determine if we should download
+    if auto_download is None:
+        # Check environment variable (default: allow download unless explicitly disabled)
+        auto_download = os.environ.get("NLTK_AUTO_DOWNLOAD", "1").lower() not in {"0", "false", "no", "off"}
+
+    if auto_download and not _NLTK_DOWNLOAD_ATTEMPTED:
+        _NLTK_DOWNLOAD_ATTEMPTED = True
+        logger.info("Downloading NLTK punkt tokenizer (one-time setup)...")
+        try:
+            nltk.download('punkt', quiet=True)
+            nltk.download('punkt_tab', quiet=True)  # For newer NLTK versions
+            _NLTK_AVAILABLE = True
+            logger.info("NLTK punkt downloaded successfully.")
+            return True
+        except Exception as e:
+            logger.warning(f"NLTK download failed ({e}). Using simpler chunking fallback.")
+            return False
+    else:
+        if not auto_download:
+            logger.warning("NLTK auto-download disabled (NLTK_AUTO_DOWNLOAD=0). Using simpler chunking fallback.")
+        return False
+
+
+# ====== LOCAL EMBEDDINGS ======
+_ST_ENCODER = None
+_ST_BATCH_SIZE = 96
+
+def _load_st_encoder():
+    """Lazy-load SentenceTransformer model once."""
+    global _ST_ENCODER
+    if _ST_ENCODER is None:
+        from sentence_transformers import SentenceTransformer
+        _ST_ENCODER = SentenceTransformer("all-MiniLM-L6-v2")
+        logger.debug("Loaded SentenceTransformer: all-MiniLM-L6-v2 (384-dim)")
+    return _ST_ENCODER
+
+
+# ====== FAISS INDEX ======
+def _try_load_faiss():
+    """Try importing FAISS; returns None if not available."""
+    try:
+        import faiss
+        return faiss
+    except ImportError:
+        logger.info("info: ann=fallback reason=missing-faiss")
+        return None
+
+
+# ====== POLICY GUARDRAILS ======
+def looks_sensitive(question: str) -> bool:
+    """Check if question involves sensitive intent (account/billing/PII)."""
+    sensitive_keywords = {
+        # Financial
+        "invoice", "billing", "credit card", "payment", "salary", "account balance",
+        # Authentication & Secrets
+        "password", "token", "api key", "secret", "private key",
+        # PII
+        "ssn", "social security", "iban", "swift", "routing number", "account number",
+        "phone number", "email address", "home address", "date of birth",
+        # Compliance
+        "gdpr", "pii", "personally identifiable", "personal data"
+    }
+    q_lower = question.lower()
+    return any(kw in q_lower for kw in sensitive_keywords)
+
+def inject_policy_preamble(snippets_block: str, question: str) -> str:
+    """Optionally prepend policy reminder for sensitive queries."""
+    if looks_sensitive(question):
+        policy = "[INTERNAL POLICY]\nDo not reveal PII, account secrets, or payment details. For account changes, redirect to secure internal admin panel.\n\n"
+        return policy + snippets_block
+    return snippets_block
+
+
+# ====== INPUT SANITIZATION ======
+def sanitize_question(q: str, max_length: int = 2000) -> str:
+    """Validate and sanitize user question.
+
+    Args:
+        q: User question string
+        max_length: Maximum allowed question length (default: 2000)
+
+    Returns:
+        Sanitized question string
+
+    Raises:
+        ValueError: If question is invalid (empty, too long, invalid characters)
+    """
+    # Type check
+    if not isinstance(q, str):
+        raise ValueError(f"Question must be a string, got {type(q).__name__}")
+
+    # Strip whitespace
+    q = q.strip()
+
+    # Check length
+    if len(q) == 0:
+        raise ValueError("Question cannot be empty. Hint: Provide a meaningful question about Clockify.")
+    if len(q) > max_length:
+        raise ValueError(
+            f"Question too long (max {max_length} characters, got {len(q)}).\n"
+            f"Hint: Break your question into smaller, focused queries."
+        )
+
+    # Check for null bytes first (specific check)
+    if '\x00' in q:
+        raise ValueError("Question contains control characters")
+
+    # Check for control characters (except newline, tab, carriage return)
+    if any(ord(c) < 32 and c not in '\n\r\t' for c in q):
+        raise ValueError("Question contains invalid control characters")
+
+    # Check for suspicious patterns (basic prompt injection detection)
+    suspicious_patterns = [
+        '<script',
+        'javascript:',
+        'eval(',
+        'exec(',
+        '__import__',
+        '<?php',
+    ]
+    q_lower = q.lower()
+    for pattern in suspicious_patterns:
+        if pattern in q_lower:
+            raise ValueError(f"Question contains suspicious pattern: {pattern}")
+
+    return q

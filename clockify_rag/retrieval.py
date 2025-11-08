@@ -905,6 +905,51 @@ def ask_llm(
         raise LLMError(f"Unexpected error in LLM call: {e}") from e
 
 
+# ====== HYBRID SCORING ======
+def hybrid_score(bm25_score: float, dense_score: float, alpha: float = 0.5) -> float:
+    """Blend BM25 and dense scores: alpha * bm25_norm + (1 - alpha) * dense_norm."""
+    return alpha * bm25_score + (1 - alpha) * dense_score
+
+
+# ====== DYNAMIC PACKING ======
+def pack_snippets_dynamic(chunk_ids: list, chunks: dict, budget_tokens: int | None = None, target_util: float = 0.75) -> tuple:
+    """Pack snippets with dynamic targeting. Returns (snippets, used_tokens, was_truncated)."""
+    if budget_tokens is None:
+        budget_tokens = config.CTX_TOKEN_BUDGET
+    if not chunk_ids:
+        return [], 0, False
+
+    snippets: list[str] = []
+    token_count = 0
+    target = int(budget_tokens * target_util)
+
+    for cid in chunk_ids:
+        try:
+            chunk = chunks[cid]
+            snippet_tokens = max(1, len(chunk.get("text", "")) // 4)
+            separator_tokens = 16
+            new_total = token_count + snippet_tokens + separator_tokens
+
+            if new_total > budget_tokens:
+                if snippets:
+                    return snippets + [{"id": "[TRUNCATED]", "text": "..."}], token_count, True
+                else:
+                    snippets.append(chunk)
+                    return snippets, token_count + snippet_tokens, True
+
+            snippets.append(chunk)
+            token_count = new_total
+
+            if token_count >= target:
+                break
+        except (KeyError, IndexError, AttributeError, TypeError) as e:
+            # Skip chunks with invalid data or missing indices
+            logger.debug(f"Skipping chunk {cid}: {e}")
+            continue
+
+    return snippets, token_count, False
+
+
 def __getattr__(name: str) -> str:
     """Dynamically resolve derived attributes such as ``SYSTEM_PROMPT``."""
     if name == "SYSTEM_PROMPT":
@@ -930,4 +975,6 @@ __all__ = [
     "SYSTEM_PROMPT",
     "USER_WRAPPER",
     "RERANK_PROMPT",
+    "hybrid_score",
+    "pack_snippets_dynamic",
 ]

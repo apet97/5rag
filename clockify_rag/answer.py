@@ -411,6 +411,49 @@ def answer_once(
     }
 
 
+def answer_to_json(answer: str, citations: list, used_tokens: int | None, topk: int, packed: int, confidence: int | None = None) -> dict:
+    """Convert answer and metadata to JSON structure.
+
+    Args:
+        answer: Generated answer text.
+        citations: Sequence of citation identifiers (chunk IDs).
+        used_tokens: Actual token budget consumed when packing context.
+        topk: Retrieval depth requested.
+        packed: Maximum number of snippets packed.
+        confidence: LLM confidence score (0-100), if available.
+    """
+    from .config import KPI, EMB_BACKEND, USE_ANN, ALPHA_HYBRID
+
+    budget_tokens = 0 if used_tokens is None else int(used_tokens)
+    result = {
+        "answer": answer,
+        "citations": citations,
+        "debug": {
+            "meta": {
+                "used_tokens": budget_tokens,
+                "topk": topk,
+                "packed": packed,
+                "emb_backend": EMB_BACKEND,
+                "ann": USE_ANN,
+                "alpha": ALPHA_HYBRID
+            },
+            "timing": {
+                "retrieve_ms": KPI.retrieve_ms,
+                "ann_ms": KPI.ann_ms,
+                "rerank_ms": KPI.rerank_ms,
+                "ask_ms": KPI.ask_ms,
+                "total_ms": KPI.retrieve_ms + KPI.rerank_ms + KPI.ask_ms
+            }
+        }
+    }
+
+    # Include confidence if available
+    if confidence is not None:
+        result["confidence"] = confidence
+
+    return result
+
+
 __all__ = [
     "apply_mmr_diversification",
     "apply_reranking",
@@ -418,4 +461,5 @@ __all__ = [
     "validate_citations",
     "generate_llm_answer",
     "answer_once",
+    "answer_to_json",
 ]
