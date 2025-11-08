@@ -147,6 +147,38 @@ def load_faiss_index(path: str = None):
         return None
 
 
+def get_faiss_index(path: str = None):
+    """Thread-safe getter for global FAISS index.
+
+    FIX (Error #1): Single source of truth for FAISS index state.
+    This function provides controlled access to the global index,
+    preventing duplicate state across modules.
+
+    Args:
+        path: Optional path to load index from if not already loaded
+
+    Returns:
+        FAISS index object or None if not available
+    """
+    global _FAISS_INDEX
+    if _FAISS_INDEX is not None:
+        return _FAISS_INDEX
+    if path:
+        return load_faiss_index(path)
+    return None
+
+
+def reset_faiss_index():
+    """Reset global FAISS index (called after rebuild).
+
+    FIX (Error #1): Centralized index reset to prevent stale references.
+    """
+    global _FAISS_INDEX
+    with _FAISS_LOCK:
+        _FAISS_INDEX = None
+        logger.debug("Reset global FAISS index cache")
+
+
 # ====== BM25 ======
 def build_bm25(chunks: list) -> dict:
     """Build BM25 index."""
@@ -391,10 +423,7 @@ def build(md_path: str, retries=0):
         logger.info(f"  Saved index metadata")
 
         # Invalidate global FAISS cache to force reload of new index
-        global _FAISS_INDEX
-        with _FAISS_LOCK:
-            _FAISS_INDEX = None
-            logger.debug("  Reset FAISS cache")
+        reset_faiss_index()
 
         logger.info("\n[4/4] Done.")
         logger.info("=" * 70)

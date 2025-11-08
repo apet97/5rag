@@ -21,6 +21,32 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
+# ====== INPUT SANITIZATION ======
+def sanitize_for_log(text: str, max_length: int = 1000) -> str:
+    """Sanitize text for safe logging to prevent log injection attacks.
+
+    FIX (Error #6): Removes control characters and truncates to prevent log injection.
+
+    Args:
+        text: Text to sanitize
+        max_length: Maximum length after sanitization
+
+    Returns:
+        Sanitized text safe for logging
+    """
+    # Remove control characters except tab
+    sanitized = "".join(
+        ch if ch.isprintable() or ch in ('\t',) else f"\\x{ord(ch):02x}"
+        for ch in text
+    )
+
+    # Truncate to max length
+    if len(sanitized) > max_length:
+        sanitized = sanitized[:max_length] + "..."
+
+    return sanitized
+
+
 # ====== CLEANUP HANDLERS ======
 def _release_lock_if_owner():
     """Release build lock on exit if held by this process."""

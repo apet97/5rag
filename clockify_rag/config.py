@@ -1,6 +1,84 @@
 """Configuration constants for Clockify RAG system."""
 
+import logging
 import os
+
+# FIX (Error #13): Helper functions for safe environment variable parsing
+_logger = logging.getLogger(__name__)
+
+
+def _parse_env_float(key: str, default: float, min_val: float = None, max_val: float = None) -> float:
+    """Parse float from environment with validation.
+
+    FIX (Error #13): Prevents crashes from invalid env var values.
+
+    Args:
+        key: Environment variable name
+        default: Default value if not set or invalid
+        min_val: Minimum allowed value (optional)
+        max_val: Maximum allowed value (optional)
+
+    Returns:
+        Parsed and validated float value
+    """
+    value = os.environ.get(key)
+    if value is None:
+        return default
+
+    try:
+        parsed = float(value)
+    except ValueError as e:
+        _logger.error(
+            f"Invalid float for {key}='{value}': {e}. "
+            f"Using default: {default}"
+        )
+        return default
+
+    if min_val is not None and parsed < min_val:
+        _logger.warning(f"{key}={parsed} below minimum {min_val}, clamping")
+        return min_val
+    if max_val is not None and parsed > max_val:
+        _logger.warning(f"{key}={parsed} above maximum {max_val}, clamping")
+        return max_val
+
+    return parsed
+
+
+def _parse_env_int(key: str, default: int, min_val: int = None, max_val: int = None) -> int:
+    """Parse int from environment with validation.
+
+    FIX (Error #13): Prevents crashes from invalid env var values.
+
+    Args:
+        key: Environment variable name
+        default: Default value if not set or invalid
+        min_val: Minimum allowed value (optional)
+        max_val: Maximum allowed value (optional)
+
+    Returns:
+        Parsed and validated int value
+    """
+    value = os.environ.get(key)
+    if value is None:
+        return default
+
+    try:
+        parsed = int(value)
+    except ValueError as e:
+        _logger.error(
+            f"Invalid integer for {key}='{value}': {e}. "
+            f"Using default: {default}"
+        )
+        return default
+
+    if min_val is not None and parsed < min_val:
+        _logger.warning(f"{key}={parsed} below minimum {min_val}, clamping")
+        return min_val
+    if max_val is not None and parsed > max_val:
+        _logger.warning(f"{key}={parsed} above maximum {max_val}, clamping")
+        return max_val
+
+    return parsed
 
 
 # ====== OLLAMA CONFIG ======
@@ -18,12 +96,16 @@ DEFAULT_PACK_TOP = 6
 DEFAULT_THRESHOLD = 0.30
 DEFAULT_SEED = 42
 
+# FIX (Error #5): Input validation to prevent DoS attacks
+MAX_QUERY_LENGTH = _parse_env_int("MAX_QUERY_LENGTH", 10000, min_val=100, max_val=100000)  # 10K chars max
+
 # ====== BM25 CONFIG ======
 # BM25 parameters (tuned for technical documentation)
 # Lower k1 (1.2→1.0): Reduces term frequency saturation for repeated technical terms
 # Lower b (0.75→0.65): Reduces length normalization penalty for longer docs
-BM25_K1 = float(os.environ.get("BM25_K1", "1.0"))
-BM25_B = float(os.environ.get("BM25_B", "0.65"))
+# FIX (Error #13): Use safe env var parsing
+BM25_K1 = _parse_env_float("BM25_K1", 1.0, min_val=0.1, max_val=10.0)
+BM25_B = _parse_env_float("BM25_B", 0.65, min_val=0.0, max_val=1.0)
 
 # ====== LLM CONFIG ======
 # FIX: Increase DEFAULT_NUM_CTX from 8192 to 16384 to support CTX_TOKEN_BUDGET of 6000
@@ -31,12 +113,13 @@ BM25_B = float(os.environ.get("BM25_B", "0.65"))
 # With old value of 8192: effective = min(6000, 4915) = 4915 ❌
 # With new value of 16384: effective = min(6000, 9830) = 6000 ✅
 # Still well within Qwen 32B's 32K context window capacity
-DEFAULT_NUM_CTX = int(os.environ.get("DEFAULT_NUM_CTX", "16384"))  # Was 8192, now 16384
+# FIX (Error #13): Use safe env var parsing
+DEFAULT_NUM_CTX = _parse_env_int("DEFAULT_NUM_CTX", 16384, min_val=512, max_val=128000)  # Was 8192, now 16384
 DEFAULT_NUM_PREDICT = 512
 # FIX: Increase default retries from 0 to 2 for remote Ollama resilience
 # Remote endpoints (especially over VPN) benefit from transient error retry
 # Can be overridden via DEFAULT_RETRIES env var or --retries CLI flag
-DEFAULT_RETRIES = int(os.environ.get("DEFAULT_RETRIES", "2"))  # Was 0, now 2
+DEFAULT_RETRIES = _parse_env_int("DEFAULT_RETRIES", 2, min_val=0, max_val=10)  # Was 0, now 2
 
 # ====== MMR & CONTEXT BUDGET ======
 MMR_LAMBDA = 0.7
@@ -45,7 +128,8 @@ MMR_LAMBDA = 0.7
 # Old: 2800 tokens (~11K chars) was too conservative, causing unnecessary truncation
 # New: 6000 tokens (~24K chars) allows more context while leaving room for Q+A
 # Can be overridden via CTX_BUDGET env var
-CTX_TOKEN_BUDGET = int(os.environ.get("CTX_BUDGET", "6000"))  # Was 2800, now 6000
+# FIX (Error #13): Use safe env var parsing
+CTX_TOKEN_BUDGET = _parse_env_int("CTX_BUDGET", 6000, min_val=100, max_val=100000)  # Was 2800, now 6000
 
 # ====== EMBEDDINGS BACKEND (v4.1) ======
 EMB_BACKEND = os.environ.get("EMB_BACKEND", "local")  # "local" or "ollama"
@@ -60,11 +144,13 @@ EMB_DIM = EMB_DIM_LOCAL if EMB_BACKEND == "local" else EMB_DIM_OLLAMA
 # ====== ANN (Approximate Nearest Neighbors) (v4.1) ======
 USE_ANN = os.environ.get("ANN", "faiss")  # "faiss" or "none"
 # Note: nlist reduced from 256→64 for arm64 macOS stability (avoid IVF training segfault)
-ANN_NLIST = int(os.environ.get("ANN_NLIST", "64"))  # IVF clusters (reduced for stability)
-ANN_NPROBE = int(os.environ.get("ANN_NPROBE", "16"))  # clusters to search
+# FIX (Error #13): Use safe env var parsing
+ANN_NLIST = _parse_env_int("ANN_NLIST", 64, min_val=8, max_val=1024)  # IVF clusters (reduced for stability)
+ANN_NPROBE = _parse_env_int("ANN_NPROBE", 16, min_val=1, max_val=256)  # clusters to search
 
 # ====== HYBRID SCORING (v4.1) ======
-ALPHA_HYBRID = float(os.environ.get("ALPHA", "0.5"))  # 0.5 = BM25 and dense equally weighted
+# FIX (Error #13): Use safe env var parsing
+ALPHA_HYBRID = _parse_env_float("ALPHA", 0.5, min_val=0.0, max_val=1.0)  # 0.5 = BM25 and dense equally weighted
 
 # ====== KPI TIMINGS (v4.1) ======
 class KPI:
@@ -77,16 +163,18 @@ class KPI:
 
 # ====== TIMEOUT CONFIG ======
 # Task G: Deterministic timeouts (environment-configurable for ops)
-EMB_CONNECT_T = float(os.environ.get("EMB_CONNECT_TIMEOUT", "3"))
-EMB_READ_T = float(os.environ.get("EMB_READ_TIMEOUT", "60"))
-CHAT_CONNECT_T = float(os.environ.get("CHAT_CONNECT_TIMEOUT", "3"))
-CHAT_READ_T = float(os.environ.get("CHAT_READ_TIMEOUT", "120"))
-RERANK_READ_T = float(os.environ.get("RERANK_READ_TIMEOUT", "180"))
+# FIX (Error #13): Use safe env var parsing
+EMB_CONNECT_T = _parse_env_float("EMB_CONNECT_TIMEOUT", 3.0, min_val=0.1, max_val=60.0)
+EMB_READ_T = _parse_env_float("EMB_READ_TIMEOUT", 60.0, min_val=1.0, max_val=600.0)
+CHAT_CONNECT_T = _parse_env_float("CHAT_CONNECT_TIMEOUT", 3.0, min_val=0.1, max_val=60.0)
+CHAT_READ_T = _parse_env_float("CHAT_READ_TIMEOUT", 120.0, min_val=1.0, max_val=600.0)
+RERANK_READ_T = _parse_env_float("RERANK_READ_TIMEOUT", 180.0, min_val=1.0, max_val=600.0)
 
 # ====== EMBEDDING BATCHING CONFIG (Rank 10) ======
 # Parallel embedding generation for faster KB builds (3-5x speedup)
-EMB_MAX_WORKERS = int(os.environ.get("EMB_MAX_WORKERS", "8"))  # Concurrent requests
-EMB_BATCH_SIZE = int(os.environ.get("EMB_BATCH_SIZE", "32"))  # Texts per batch
+# FIX (Error #13): Use safe env var parsing
+EMB_MAX_WORKERS = _parse_env_int("EMB_MAX_WORKERS", 8, min_val=1, max_val=64)  # Concurrent requests
+EMB_BATCH_SIZE = _parse_env_int("EMB_BATCH_SIZE", 32, min_val=1, max_val=1000)  # Texts per batch
 
 # ====== REFUSAL STRING ======
 # Exact refusal string (ASCII quotes only)
@@ -126,7 +214,8 @@ FILES = {
 
 # ====== BUILD LOCK CONFIG ======
 BUILD_LOCK = ".build.lock"
-BUILD_LOCK_TTL_SEC = int(os.environ.get("BUILD_LOCK_TTL_SEC", "900"))  # Task D: 15 minutes default
+# FIX (Error #13): Use safe env var parsing
+BUILD_LOCK_TTL_SEC = _parse_env_int("BUILD_LOCK_TTL_SEC", 900, min_val=60, max_val=7200)  # Task D: 15 minutes default
 
 # ====== RETRIEVAL CONFIG (CONTINUED) ======
 # FAISS/HNSW candidate generation (Quick Win #6)

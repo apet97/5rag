@@ -9,6 +9,10 @@ from collections import deque
 
 logger = logging.getLogger(__name__)
 
+# FIX (Error #2): Declare globals at module level for safe initialization
+_RATE_LIMITER = None
+_QUERY_CACHE = None
+
 
 class RateLimiter:
     """Token bucket rate limiter for DoS prevention."""
@@ -22,7 +26,9 @@ class RateLimiter:
         """
         self.max_requests = max_requests
         self.window_seconds = window_seconds
-        self.requests: deque = deque()
+        # FIX (Error #4): Add maxlen as defense-in-depth safety net
+        # maxlen = max_requests * 2 provides safety buffer if cleanup fails
+        self.requests: deque = deque(maxlen=max_requests * 2)
         self._lock = threading.RLock()  # Thread safety lock
 
     def allow_request(self) -> bool:
@@ -63,9 +69,12 @@ class RateLimiter:
 
 # Global rate limiter (10 queries per minute by default)
 def get_rate_limiter():
-    """Get global rate limiter instance."""
+    """Get global rate limiter instance.
+
+    FIX (Error #2): Use proper `is None` check instead of fragile globals() check.
+    """
     global _RATE_LIMITER
-    if '_RATE_LIMITER' not in globals():
+    if _RATE_LIMITER is None:
         _RATE_LIMITER = RateLimiter(
             max_requests=int(os.environ.get("RATE_LIMIT_REQUESTS", "10")),
             window_seconds=int(os.environ.get("RATE_LIMIT_WINDOW", "60"))
@@ -86,7 +95,9 @@ class QueryCache:
         self.maxsize = maxsize
         self.ttl_seconds = ttl_seconds
         self.cache: dict = {}  # {question_hash: (answer, metadata_with_timestamp, timestamp)}
-        self.access_order: deque = deque()  # For LRU eviction
+        # FIX (Error #4): Add maxlen as defense-in-depth safety net
+        # maxlen = maxsize * 2 provides safety buffer if cleanup fails
+        self.access_order: deque = deque(maxlen=maxsize * 2)  # For LRU eviction
         self.hits = 0
         self.misses = 0
         self._lock = threading.RLock()  # Thread safety lock
@@ -208,9 +219,12 @@ class QueryCache:
 
 # Global query cache (100 entries, 1 hour TTL by default)
 def get_query_cache():
-    """Get global query cache instance."""
+    """Get global query cache instance.
+
+    FIX (Error #2): Use proper `is None` check instead of fragile globals() check.
+    """
     global _QUERY_CACHE
-    if '_QUERY_CACHE' not in globals():
+    if _QUERY_CACHE is None:
         _QUERY_CACHE = QueryCache(
             maxsize=int(os.environ.get("CACHE_MAXSIZE", "100")),
             ttl_seconds=int(os.environ.get("CACHE_TTL", "3600"))
@@ -220,7 +234,10 @@ def get_query_cache():
 
 def log_query(query: str, answer: str, retrieved_chunks: list, latency_ms: float,
               refused: bool = False, metadata: dict = None):
-    """Log query with structured JSON format for monitoring and analytics."""
+    """Log query with structured JSON format for monitoring and analytics.
+
+    FIX (Error #6): Sanitizes user input to prevent log injection attacks.
+    """
     import json
     from .config import (
         LOG_QUERY_ANSWER_PLACEHOLDER,
@@ -228,6 +245,7 @@ def log_query(query: str, answer: str, retrieved_chunks: list, latency_ms: float
         LOG_QUERY_INCLUDE_CHUNKS,
         QUERY_LOG_FILE,
     )
+    from .utils import sanitize_for_log
 
     normalized_chunks = []
     for chunk in retrieved_chunks:
@@ -276,10 +294,11 @@ def log_query(query: str, answer: str, retrieved_chunks: list, latency_ms: float
                         item.pop("text", None)
                         item.pop("chunk", None)
 
+    # FIX (Error #6): Sanitize query and answer to prevent log injection
     log_entry = {
         "timestamp": time.time(),
         "timestamp_iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "query": query,
+        "query": sanitize_for_log(query, max_length=2000),
         "refused": refused,
         "latency_ms": latency_ms,
         "num_chunks_retrieved": len(chunk_ids),
@@ -296,7 +315,7 @@ def log_query(query: str, answer: str, retrieved_chunks: list, latency_ms: float
     }
 
     if LOG_QUERY_INCLUDE_ANSWER:
-        log_entry["answer"] = answer
+        log_entry["answer"] = sanitize_for_log(answer, max_length=5000)
     elif LOG_QUERY_ANSWER_PLACEHOLDER:
         log_entry["answer"] = LOG_QUERY_ANSWER_PLACEHOLDER
 

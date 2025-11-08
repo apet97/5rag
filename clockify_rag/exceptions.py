@@ -19,3 +19,11 @@ class IndexLoadError(Exception):
 class BuildError(Exception):
     """Knowledge base build failed."""
     pass
+
+
+class ValidationError(Exception):
+    """Input validation failed.
+
+    FIX (Error #5): Added for query length validation to prevent DoS attacks.
+    """
+    pass
