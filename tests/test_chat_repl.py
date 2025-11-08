@@ -1,20 +1,27 @@
 import json
+import os
 import pytest
 
-import clockify_support_cli_final as cli
+from clockify_rag.cli import chat_repl
+from clockify_rag import answer_once, build, load_index
+import clockify_rag.cli as cli_module
 
 
 @pytest.mark.skip(reason="Test needs update: answer_once() return structure changed, load_index() location changed")
 def test_chat_repl_json_output(monkeypatch, capsys):
     # Ensure environment setup routines are no-ops for the test
-    monkeypatch.setattr(cli, "_log_config_summary", lambda **_: None)
-    monkeypatch.setattr(cli, "warmup_on_startup", lambda: None)
-    monkeypatch.setattr(cli.os.path, "exists", lambda path: True)
-    monkeypatch.setattr(cli, "build", lambda *_, **__: None)
+    # Note: _log_config_summary and warmup_on_startup may need to be found in cli module
+    # monkeypatch.setattr(cli_module, "_log_config_summary", lambda **_: None)
+    # monkeypatch.setattr(cli_module, "warmup_on_startup", lambda: None)
+    monkeypatch.setattr(os.path, "exists", lambda path: True)
+
+    # Import build from indexing module
+    import clockify_rag.indexing
+    monkeypatch.setattr(clockify_rag.indexing, "build", lambda *_, **__: None)
 
     # Provide deterministic artifacts and retrieval response
     chunks = {"chunk-1": {"id": "chunk-1", "text": "Citation text"}}
-    monkeypatch.setattr(cli, "load_index", lambda: (chunks, object(), object(), object()))
+    monkeypatch.setattr(clockify_rag.indexing, "load_index", lambda: (chunks, object(), object(), object()))
 
     expected_citations = [{"id": "chunk-1", "text": "Citation text"}]
     expected_tokens = 987
@@ -25,7 +32,8 @@ def test_chat_repl_json_output(monkeypatch, capsys):
             "used_tokens": expected_tokens,
         }
 
-    monkeypatch.setattr(cli, "answer_once", fake_answer_once)
+    import clockify_rag.answer
+    monkeypatch.setattr(clockify_rag.answer, "answer_once", fake_answer_once)
 
     # Simulate a single question followed by EOF to exit the REPL
     inputs = iter(["What is Clockify?"])
@@ -38,7 +46,7 @@ def test_chat_repl_json_output(monkeypatch, capsys):
 
     monkeypatch.setattr("builtins.input", fake_input)
 
-    cli.chat_repl(use_json=True)
+    chat_repl(use_json=True)
 
     captured = capsys.readouterr().out
     json_start = captured.index("{")

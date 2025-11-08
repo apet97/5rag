@@ -8,7 +8,6 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from clockify_rag.retrieval import retrieve, normalize_scores_zscore, DenseScoreStore
 from clockify_rag.utils import sanitize_question
-import clockify_support_cli_final as cli
 
 # Check if Ollama is available (may not be in CI)
 def is_ollama_available():
@@ -281,7 +280,7 @@ def test_retrieve_faiss_skips_full_dot(monkeypatch, sample_chunks, sample_embedd
     import clockify_rag.retrieval as retrieval_module
     monkeypatch.setattr(retrieval_module, "embed_query", lambda question, retries=0: query_vec, raising=False)
 
-    selected, scores = cli.retrieve("How do I track time?", sample_chunks, tracker, sample_bm25, top_k=3)
+    selected, scores = retrieve("How do I track time?", sample_chunks, tracker, sample_bm25, top_k=3)
 
     assert tracker.dot_calls == 0, "FAISS path should not compute full dot product"
     assert fake_index.search_calls == 1, "FAISS index should be used"

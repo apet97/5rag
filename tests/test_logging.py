@@ -1,6 +1,6 @@
 import json
 
-import clockify_support_cli_final as cli
+from clockify_rag.caching import log_query
 import clockify_rag.config
 
 
@@ -18,7 +18,7 @@ def test_log_query_records_non_zero_scores(tmp_path, monkeypatch):
         {"id": "chunk-2", "dense": 0.10, "bm25": 0.05, "hybrid": 0.08},
     ]
 
-    cli.log_query(
+    log_query(
         query="What is Clockify?",
         answer="Clockify is a time tracker.",
         retrieved_chunks=retrieved_chunks,

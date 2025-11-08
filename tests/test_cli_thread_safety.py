@@ -3,13 +3,13 @@
 import threading
 import pytest
 
-import clockify_support_cli_final as cli
+from clockify_rag.caching import QueryCache, RateLimiter
 
 
 def test_cli_query_cache_concurrent_access():
     """Ensure the CLI's QueryCache handles concurrent put/get operations."""
 
-    cache = cli.QueryCache(maxsize=128, ttl_seconds=5)
+    cache = QueryCache(maxsize=128, ttl_seconds=5)
     errors = []
 
     def worker(idx: int) -> None:
@@ -39,7 +39,7 @@ def test_cli_query_cache_concurrent_access():
 def test_cli_rate_limiter_concurrent_access():
     """Verify the CLI's RateLimiter safely handles concurrent requests."""
 
-    limiter = cli.RateLimiter(max_requests=20, window_seconds=1)
+    limiter = RateLimiter(max_requests=20, window_seconds=1)
     allowed = 0
     denied = 0
     counter_lock = threading.Lock()

@@ -1,19 +1,27 @@
 import numpy as np
 import pytest
 
-import clockify_support_cli_final as cli
+from clockify_rag import answer_once
+from clockify_rag.caching import get_query_cache, get_rate_limiter
+import clockify_rag.retrieval as retrieval_module
+import clockify_rag.answer as answer_module
+
+# Get singleton instances
+QUERY_CACHE = get_query_cache()
+RATE_LIMITER = get_rate_limiter()
 
 
 @pytest.mark.skip(reason="Test needs update: answer_once() return structure changed and no longer includes 'debug' parameter or 'cached'/'cache_hit' metadata")
 def test_answer_once_logs_retrieved_chunks_with_cache(monkeypatch):
-    cli.QUERY_CACHE.clear()
+    QUERY_CACHE.clear()
 
     # Enable chunk logging for this test by monkeypatching the module constant
-    monkeypatch.setattr(cli, "LOG_QUERY_INCLUDE_CHUNKS", True)
+    # Note: LOG_QUERY_INCLUDE_CHUNKS may have moved to config module
+    # monkeypatch.setattr(config, "LOG_QUERY_INCLUDE_CHUNKS", True)
 
     # Ensure rate limiter allows requests during the test
-    monkeypatch.setattr(cli.RATE_LIMITER, "allow_request", lambda: True)
-    monkeypatch.setattr(cli.RATE_LIMITER, "wait_time", lambda: 0)
+    monkeypatch.setattr(RATE_LIMITER, "allow_request", lambda: True)
+    monkeypatch.setattr(RATE_LIMITER, "wait_time", lambda: 0)
 
     chunks = [
         {
@@ -33,25 +41,26 @@ def test_answer_once_logs_retrieved_chunks_with_cache(monkeypatch):
             "hybrid": np.array([0.5], dtype=np.float32),
         }
 
-    monkeypatch.setattr(cli, "retrieve", fake_retrieve)
+    monkeypatch.setattr(retrieval_module, "retrieve", fake_retrieve)
     monkeypatch.setattr(
-        cli,
+        answer_module,
         "apply_mmr_diversification",
         lambda selected, scores, vecs_arg, pack_top: selected,
     )
     monkeypatch.setattr(
-        cli,
+        answer_module,
         "apply_reranking",
         lambda question, chunks_arg, mmr_selected, scores, use_rerank, seed, num_ctx, num_predict, retries: (mmr_selected, {}, False, "", 0.0),
     )
-    monkeypatch.setattr(cli, "coverage_ok", lambda selected, dense_scores, threshold: True)
+    monkeypatch.setattr(retrieval_module, "coverage_ok", lambda selected, dense_scores, threshold: True)
 
     def fake_pack_snippets(chunks_arg, selected, pack_top, budget_tokens, num_ctx):
         return "context", [chunks_arg[i]["id"] for i in selected], 12
 
-    monkeypatch.setattr(cli, "pack_snippets", fake_pack_snippets)
-    monkeypatch.setattr(cli, "inject_policy_preamble", lambda block, question: block)
-    monkeypatch.setattr(cli, "generate_llm_answer", lambda *args, **kwargs: ("answer", 0.01, 88))
+    monkeypatch.setattr(retrieval_module, "pack_snippets", fake_pack_snippets)
+    # Note: inject_policy_preamble may need to be updated when test is fixed
+    # monkeypatch.setattr(answer_module, "inject_policy_preamble", lambda block, question: block)
+    monkeypatch.setattr(answer_module, "generate_llm_answer", lambda *args, **kwargs: ("answer", 0.01, 88))
 
     logged_calls = []
 
@@ -67,9 +76,10 @@ def test_answer_once_logs_retrieved_chunks_with_cache(monkeypatch):
             }
         )
 
-    monkeypatch.setattr(cli, "log_query", fake_log_query)
+    # Note: log_query may need to be updated when test is fixed
+    # monkeypatch.setattr(answer_module, "log_query", fake_log_query)
 
-    answer, metadata = cli.answer_once(
+    answer, metadata = answer_once(
         "What is the chunk?",
         chunks,
         vecs_n,
@@ -96,7 +106,7 @@ def test_answer_once_logs_retrieved_chunks_with_cache(monkeypatch):
     assert chunk_entry["dense"] == pytest.approx(0.9)
 
     # Second call should hit the cache and avoid invoking log_query again
-    cached_answer, cached_metadata = cli.answer_once(
+    cached_answer, cached_metadata = answer_once(
         "What is the chunk?",
         chunks,
         vecs_n,
