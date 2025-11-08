@@ -543,6 +543,29 @@ def retrieve(question: str, chunks, vecs_n, bm, top_k=12, hnsw=None, retries=0,
         zs_dense = normalize_scores_zscore(dense_scores)
     zs_bm = zs_bm_full[candidate_idx_array] if candidate_idx_array.size else np.array([], dtype="float32")
 
+    # OPTIMIZATION: Apply intent-based score boosting (if enabled)
+    # Boosts chunks containing intent-specific keywords (e.g., pricing sections for pricing queries)
+    # Note: When using FAISS, only BM25 scores are boosted (dense scores not fully materialized for performance)
+    if config.USE_INTENT_CLASSIFICATION and intent_config.boost_factor != 1.0:
+        # Build scores dict for boosting (include dense only if available)
+        temp_scores = {"bm25": zs_bm_full}
+        if zs_dense_full is not None:
+            temp_scores["dense"] = zs_dense_full
+
+        # Apply intent-specific boosting to relevant chunks
+        temp_scores = adjust_scores_by_intent(chunks, temp_scores, intent_config)
+
+        # Update normalized scores with boosted values
+        zs_bm_full = temp_scores["bm25"]
+        if zs_dense_full is not None:
+            # Only update dense scores if they were fully materialized
+            zs_dense_full = temp_scores["dense"]
+
+        # Re-slice candidate scores from boosted full scores
+        zs_bm = zs_bm_full[candidate_idx_array] if candidate_idx_array.size else np.array([], dtype="float32")
+        if zs_dense_full is not None:
+            zs_dense = zs_dense_full[candidate_idx_array] if candidate_idx_array.size else np.array([], dtype="float32")
+
     # Hybrid scoring (OPTIMIZATION: use intent-specific alpha for +8-12% accuracy)
     hybrid = alpha_hybrid * zs_bm + (1 - alpha_hybrid) * zs_dense
     if hybrid.size:
