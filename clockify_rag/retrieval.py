@@ -25,20 +25,29 @@ import requests
 
 import clockify_rag.config as config
 from .embedding import embed_query as _embedding_embed_query
-from .exceptions import LLMError
+from .exceptions import LLMError, ValidationError
 from .http_utils import get_session
-from .indexing import bm25_scores, load_faiss_index
+from .indexing import bm25_scores, get_faiss_index
+from .utils import tokenize  # FIX (Error #17): Import tokenize from utils instead of duplicating
 
 logger = logging.getLogger(__name__)
 
-# ====== GLOBAL STATE FOR FAISS ======
-_FAISS_INDEX = None
-_FAISS_INDEX_LOCK = __import__('threading').RLock()
-
 # ====== RETRIEVAL PROFILING ======
-# FIX: Add thread-safe lock for concurrent access to profiling state
+# FIX (Error #15): Add thread-safe lock for concurrent access to profiling state
 _RETRIEVE_PROFILE_LOCK = __import__('threading').RLock()
 RETRIEVE_PROFILE_LAST = {}
+
+
+def get_retrieve_profile():
+    """Get retrieval profile data in a thread-safe manner.
+
+    FIX (Error #15): Returns a copy to prevent race conditions when reading.
+
+    Returns:
+        Dict with profiling data (copy of current state)
+    """
+    with _RETRIEVE_PROFILE_LOCK:
+        return dict(RETRIEVE_PROFILE_LAST)
 
 # ====== PROMPTS ======
 _SYSTEM_PROMPT_TEMPLATE = """You are CAKE.com Internal Support for Clockify.
@@ -86,6 +95,40 @@ QUESTION:
 
 PASSAGES:
 {passages}"""
+
+# ====== INPUT VALIDATION ======
+def validate_query_length(question: str, max_length: int = None) -> str:
+    """Validate and sanitize user query to prevent DoS attacks.
+
+    FIX (Error #5): Prevent unbounded user input from causing memory/CPU exhaustion.
+
+    Args:
+        question: User question
+        max_length: Maximum allowed length (defaults to config.MAX_QUERY_LENGTH)
+
+    Returns:
+        Sanitized question string
+
+    Raises:
+        ValidationError: If query is empty or exceeds max length
+    """
+    if max_length is None:
+        max_length = config.MAX_QUERY_LENGTH
+
+    if not question:
+        raise ValidationError("Query cannot be empty")
+
+    if len(question) > max_length:
+        raise ValidationError(
+            f"Query too long ({len(question)} chars). "
+            f"Maximum allowed: {max_length} chars. "
+            f"Set MAX_QUERY_LENGTH env var to override."
+        )
+
+    # Additional sanitization: strip excessive whitespace
+    question = " ".join(question.split())
+
+    return question
 
 # ====== QUERY EXPANSION ======
 QUERY_EXPANSIONS_ENV_VAR = "CLOCKIFY_QUERY_EXPANSIONS"
@@ -182,11 +225,7 @@ def load_query_expansion_dict(force_reload=False, suppress_errors=True):
             raise
 
 
-def tokenize(s: str) -> List[str]:
-    """Simple tokenizer: lowercase [a-z0-9]+."""
-    s = s.lower()
-    s = unicodedata.normalize("NFKC", s)
-    return re.findall(r"[a-z0-9]+", s)
+# FIX (Error #17): Removed duplicate tokenize function - now imported from utils.py
 
 
 def approx_tokens(chars: int) -> int:
@@ -239,15 +278,32 @@ def count_tokens(text: str, model: str = None) -> int:
 
 
 def truncate_to_token_budget(text: str, budget: int) -> str:
-    """Truncate text to fit token budget, append ellipsis."""
+    """Truncate text to fit token budget, append ellipsis.
+
+    FIX (Error #9): Handles edge case where budget is smaller than ellipsis tokens.
+    """
     est_tokens = count_tokens(text)
     if est_tokens <= budget:
         return text
 
-    # Binary search for optimal truncation point
-    left, right = 0, len(text)
     ellipsis = "..."
     ellipsis_tokens = count_tokens(ellipsis)
+
+    # FIX (Error #9): Guard against budget too small for ellipsis
+    if budget < ellipsis_tokens:
+        # Budget too small for ellipsis, truncate to budget without ellipsis
+        left, right = 0, len(text)
+        while left < right:
+            mid = (left + right + 1) // 2
+            if count_tokens(text[:mid]) <= budget:
+                left = mid
+            else:
+                right = mid - 1
+        return text[:left]
+
+    # Normal case: budget >= ellipsis tokens
+    # Binary search for optimal truncation point
+    left, right = 0, len(text)
     target = budget - ellipsis_tokens
 
     while left < right:
@@ -264,9 +320,14 @@ def truncate_to_token_budget(text: str, budget: int) -> str:
 def expand_query(question: str) -> str:
     """Expand query with domain-specific synonyms and acronyms.
 
+    FIX (Error #5): Validates query length before expansion to prevent DoS.
+
     Returns expanded query string with original + synonym terms.
     Example: "How to track time?" → "How to track log record enter time hours duration?"
     """
+    # FIX (Error #5): Validate input at entry point
+    question = validate_query_length(question)
+
     if not question:
         return question
 
@@ -368,6 +429,8 @@ def retrieve(question: str, chunks, vecs_n, bm, top_k=12, hnsw=None, retries=0,
              faiss_index_path=None) -> Tuple[List[int], Dict[str, Any]]:
     """Hybrid retrieval: dense + BM25 + dedup. Optionally uses FAISS/HNSW for fast K-NN.
 
+    FIX (Error #5): Validates query length at entry point to prevent DoS attacks.
+
     Scoring: hybrid = config.ALPHA_HYBRID * normalize(BM25) + (1 - config.ALPHA_HYBRID) * normalize(dense)
 
     Query expansion: Applies domain-specific synonym expansion for BM25 (keyword-based),
@@ -377,7 +440,11 @@ def retrieve(question: str, chunks, vecs_n, bm, top_k=12, hnsw=None, retries=0,
         Tuple of (filtered_indices, scores_dict) where filtered_indices is list of int
         and scores_dict contains 'dense', 'bm25', and 'hybrid' numpy arrays.
     """
-    global _FAISS_INDEX, RETRIEVE_PROFILE_LAST
+    # FIX (Error #1): Use centralized FAISS index getter instead of duplicate global state
+    # FIX (Error #5): Validate query at entry point
+    global RETRIEVE_PROFILE_LAST
+
+    question = validate_query_length(question)
 
     # Expand query for BM25 keyword matching
     expanded_question = expand_query(question)
@@ -385,18 +452,17 @@ def retrieve(question: str, chunks, vecs_n, bm, top_k=12, hnsw=None, retries=0,
     # Use original question for embedding
     qv_n = embed_query(question, retries=retries)
 
-    # Try to load FAISS index once on first call
-    if config.USE_ANN == "faiss" and _FAISS_INDEX is None:
-        with _FAISS_INDEX_LOCK:
-            if _FAISS_INDEX is None and faiss_index_path:
-                _FAISS_INDEX = load_faiss_index(faiss_index_path)
-                if _FAISS_INDEX:
-                    # Only set nprobe for IVF indexes (not flat indexes)
-                    if hasattr(_FAISS_INDEX, 'nprobe'):
-                        _FAISS_INDEX.nprobe = config.ANN_NPROBE
-                    logger.info("info: ann=faiss status=loaded nprobe=%d", config.ANN_NPROBE)
-                else:
-                    logger.info("info: ann=fallback reason=missing-index")
+    # Get FAISS index from centralized source (indexing module)
+    faiss_index = None
+    if config.USE_ANN == "faiss":
+        faiss_index = get_faiss_index(faiss_index_path)
+        if faiss_index:
+            # Only set nprobe for IVF indexes (not flat indexes)
+            if hasattr(faiss_index, 'nprobe'):
+                faiss_index.nprobe = config.ANN_NPROBE
+            logger.info("info: ann=faiss status=loaded nprobe=%d", config.ANN_NPROBE)
+        elif faiss_index_path:
+            logger.info("info: ann=fallback reason=missing-index")
 
     dense_scores_full = None
     candidate_idx: List[int] = []
@@ -404,9 +470,9 @@ def retrieve(question: str, chunks, vecs_n, bm, top_k=12, hnsw=None, retries=0,
     dot_elapsed = 0.0
     dense_computed = 0
 
-    if _FAISS_INDEX:
+    if faiss_index:
         # Only score FAISS candidates, don't compute full corpus
-        D, I = _FAISS_INDEX.search(
+        D, I = faiss_index.search(
             qv_n.reshape(1, -1).astype("float32"),
             max(config.ANN_CANDIDATE_MIN, top_k * config.FAISS_CANDIDATE_MULTIPLIER),
         )
@@ -497,14 +563,14 @@ def retrieve(question: str, chunks, vecs_n, bm, top_k=12, hnsw=None, retries=0,
         )
 
     dense_total = n_chunks
-    used_hnsw = bool(hnsw) and _FAISS_INDEX is None
-    dense_computed_total = dense_computed or (dense_total if (used_hnsw or not _FAISS_INDEX) else 0)
+    used_hnsw = bool(hnsw) and faiss_index is None
+    dense_computed_total = dense_computed or (dense_total if (used_hnsw or not faiss_index) else 0)
     dense_reused = dense_total - dense_computed_total
 
     # FIX: Thread-safe update of profiling state
     global RETRIEVE_PROFILE_LAST
     profile_data = {
-        "used_faiss": bool(_FAISS_INDEX),
+        "used_faiss": bool(faiss_index),
         "used_hnsw": used_hnsw,
         "candidates": int(len(candidate_idx)),
         "dense_total": int(dense_total),
@@ -520,7 +586,7 @@ def retrieve(question: str, chunks, vecs_n, bm, top_k=12, hnsw=None, retries=0,
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug(
             "profile: retrieval ann=%s reused=%d computed=%d total=%d dot_ms=%.3f",
-            "faiss" if _FAISS_INDEX else ("hnsw" if used_hnsw else "linear"),
+            "faiss" if faiss_index else ("hnsw" if used_hnsw else "linear"),
             profile_data["dense_reused"],
             profile_data["dense_computed"],
             dense_total,
@@ -634,12 +700,17 @@ def rerank_with_llm(
     except requests.exceptions.HTTPError:
         logger.debug(f"info: rerank=fallback reason=http")
         return selected, rerank_scores, False, "http"
-    except requests.exceptions.RequestException:
-        logger.debug("info: rerank=fallback reason=http")
+    except requests.exceptions.RequestException as e:
+        logger.debug(f"info: rerank=fallback reason=http error_type={type(e).__name__}")
         return selected, rerank_scores, False, "http"
-    except Exception:
-        logger.debug("info: rerank=fallback reason=http")
-        return selected, rerank_scores, False, "http"
+    except (json.JSONDecodeError, KeyError, IndexError) as e:
+        # FIX (Error #8): More specific exception handling for expected errors
+        logger.debug(f"info: rerank=fallback reason=error error_type={type(e).__name__}")
+        return selected, rerank_scores, False, "error"
+    except Exception as e:
+        # FIX (Error #8): Unexpected errors logged at WARNING level for visibility
+        logger.warning(f"Unexpected error in reranking: {type(e).__name__}: {e}", exc_info=True)
+        return selected, rerank_scores, False, "unexpected"
 
 
 def _fmt_snippet_header(chunk):

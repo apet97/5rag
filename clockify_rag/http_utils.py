@@ -1,8 +1,10 @@
 """HTTP session management and retry logic for Ollama API calls."""
 
+import atexit
 import logging
 import os
 import threading
+import weakref
 
 import requests
 
@@ -13,9 +15,40 @@ logger = logging.getLogger(__name__)
 # Thread-local storage for requests sessions (fix for parallel embedding)
 _thread_local = threading.local()
 
+# FIX (Error #3): Track all thread-local sessions for cleanup to prevent memory leaks
+_sessions_registry = weakref.WeakSet()
+
 # Global requests session for keep-alive and retry logic (legacy, for non-threaded callers)
 REQUESTS_SESSION = None
 REQUESTS_SESSION_RETRIES = 0
+
+
+def _cleanup_thread_local_session():
+    """Close thread-local session on thread exit.
+
+    FIX (Error #3): Prevent session leaks in long-running processes with thread churn.
+    """
+    if hasattr(_thread_local, 'session'):
+        try:
+            _thread_local.session.close()
+            logger.debug("Closed thread-local session on thread exit")
+        except Exception as e:
+            # Best-effort cleanup; log but don't raise
+            logger.debug(f"Failed to close thread-local session: {e}")
+
+
+@atexit.register
+def _cleanup_all_sessions():
+    """Close all remaining sessions on process exit.
+
+    FIX (Error #3): Cleanup handler for graceful process shutdown.
+    """
+    for sess in list(_sessions_registry):
+        try:
+            sess.close()
+        except Exception:
+            pass  # Best-effort cleanup
+    logger.debug("Cleaned up all sessions on process exit")
 
 
 def _mount_retries(sess: requests.Session, retries: int):
@@ -75,6 +108,8 @@ def _mount_retries(sess: requests.Session, retries: int):
 def get_session(retries=0, use_thread_local=True) -> requests.Session:
     """Get or create requests session with optional retry logic.
 
+    FIX (Error #3): Sessions are now tracked and cleaned up on exit to prevent leaks.
+
     Args:
         retries: Number of retries for failed requests
         use_thread_local: If True, create thread-local session (safe for parallel use).
@@ -89,6 +124,9 @@ def get_session(retries=0, use_thread_local=True) -> requests.Session:
             _thread_local.session = requests.Session()
             _thread_local.session.trust_env = (os.getenv("ALLOW_PROXIES") == "1")
             _thread_local.retries = 0
+            # FIX (Error #3): Register session for cleanup
+            _sessions_registry.add(_thread_local.session)
+            logger.debug("Created new thread-local session (registered for cleanup)")
 
         # Upgrade retries if higher count requested
         if retries > _thread_local.retries:
@@ -103,6 +141,8 @@ def get_session(retries=0, use_thread_local=True) -> requests.Session:
             REQUESTS_SESSION = requests.Session()
             # Set trust_env based on ALLOW_PROXIES env var
             REQUESTS_SESSION.trust_env = (os.getenv("ALLOW_PROXIES") == "1")
+            # FIX (Error #3): Register global session for cleanup
+            _sessions_registry.add(REQUESTS_SESSION)
             if retries > 0:
                 _mount_retries(REQUESTS_SESSION, retries)
             REQUESTS_SESSION_RETRIES = retries
