@@ -103,6 +103,11 @@ CTX_TOKEN_BUDGET = config.CTX_TOKEN_BUDGET
 CHUNK_CHARS = config.CHUNK_CHARS
 CHUNK_OVERLAP = config.CHUNK_OVERLAP
 FILES = config.FILES
+# Timeout constants (Task G)
+EMB_CONNECT_T = config.EMB_CONNECT_T
+EMB_READ_T = config.EMB_READ_T
+CHAT_CONNECT_T = config.CHAT_CONNECT_T
+CHAT_READ_T = config.CHAT_READ_T
 
 # Rank 23: NLTK for sentence-aware chunking (with optional download control)
 _NLTK_AVAILABLE = False
