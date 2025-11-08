@@ -7,7 +7,8 @@ import numpy as np
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from clockify_support_cli_final import build_bm25, bm25_scores, tokenize
+from clockify_rag.indexing import build_bm25, bm25_scores
+from clockify_rag.utils import tokenize
 
 
 class TestBM25:

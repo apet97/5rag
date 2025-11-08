@@ -1,6 +1,6 @@
 import json
 
-from clockify_support_cli_final import answer_to_json
+from clockify_rag.answer import answer_to_json
 
 
 def test_answer_to_json_uses_measured_token_budget():

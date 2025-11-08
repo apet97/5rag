@@ -6,8 +6,9 @@ import sys
 import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from clockify_rag.retrieval import retrieve, normalize_scores_zscore, DenseScoreStore
+from clockify_rag.utils import sanitize_question
 import clockify_support_cli_final as cli
-from clockify_support_cli_final import retrieve, normalize_scores_zscore, sanitize_question, DenseScoreStore
 
 # Check if Ollama is available (may not be in CI)
 def is_ollama_available():

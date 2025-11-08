@@ -39,3 +39,4 @@ venv/
 .swp
 .swo
 *~
+rag_env/

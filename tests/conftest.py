@@ -6,10 +6,11 @@ import json
 import tempfile
 import os
 
-# Import from clockify_support_cli_final
+# Import from refactored package modules
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from clockify_support_cli_final import build_bm25, DEFAULT_TOP_K
+from clockify_rag.indexing import build_bm25
+from clockify_rag.config import DEFAULT_TOP_K
 
 
 @pytest.fixture

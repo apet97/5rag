@@ -39,8 +39,8 @@ import numpy as np
 
 # Package imports
 import clockify_rag.config as config
-from clockify_rag.caching import get_query_cache, get_rate_limiter
-from clockify_rag.utils import _release_lock_if_owner
+from clockify_rag.caching import get_query_cache, get_rate_limiter, QueryCache, RateLimiter, log_query
+from clockify_rag.utils import _release_lock_if_owner, _log_config_summary
 from clockify_rag.exceptions import EmbeddingError, LLMError, IndexLoadError, BuildError
 from clockify_rag.cli import (
     setup_cli_args,
@@ -50,6 +50,23 @@ from clockify_rag.cli import (
     handle_chat_command,
     chat_repl
 )
+
+# Re-export config constants and functions for backward compatibility with tests
+from clockify_rag.config import (
+    LOG_QUERY_INCLUDE_CHUNKS,
+    QUERY_LOG_FILE,
+)
+
+# Re-export functions used by tests
+from clockify_rag.answer import answer_once
+from clockify_rag.retrieval import retrieve, coverage_ok
+from clockify_rag.answer import (
+    apply_mmr_diversification,
+    apply_reranking,
+    pack_snippets,
+    generate_llm_answer,
+)
+from clockify_rag.utils import inject_policy_preamble
 
 # ====== MODULE GLOBALS ======
 logger = logging.getLogger(__name__)
