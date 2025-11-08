@@ -72,7 +72,10 @@ def test_retrieve_local_backend(monkeypatch, sample_chunks, sample_embeddings, s
     assert calls["count"] == 1, "Local embedding path should be used exactly once"
     assert selected, "Should return at least one chunk"
     assert max(selected) < len(sample_chunks)
-    assert set(scores.keys()) == {"dense", "bm25", "hybrid"}
+    # Verify required score keys (intent_metadata is optional enhancement)
+    assert "dense" in scores
+    assert "bm25" in scores
+    assert "hybrid" in scores
     assert isinstance(scores["dense"], retrieval.DenseScoreStore)
 
 

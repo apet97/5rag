@@ -61,8 +61,10 @@ class TestQueryExpansion:
         assert expanded == query
 
     def test_expand_query_empty(self):
-        """Test that empty query returns empty."""
-        assert expand_query("") == ""
+        """Test that empty query raises ValidationError."""
+        from clockify_rag.exceptions import ValidationError
+        with pytest.raises(ValidationError, match="cannot be empty"):
+            expand_query("")
 
     def test_expand_query_multiple_terms(self):
         """Test query with multiple matching terms."""

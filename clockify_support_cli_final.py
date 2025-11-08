@@ -48,7 +48,8 @@ from clockify_rag.cli import (
     handle_build_command,
     handle_ask_command,
     handle_chat_command,
-    chat_repl
+    chat_repl,
+    warmup_on_startup
 )
 
 # Re-export config constants and functions for backward compatibility with tests
@@ -60,6 +61,7 @@ from clockify_rag.config import (
 # Re-export functions used by tests
 from clockify_rag.answer import answer_once
 from clockify_rag.retrieval import retrieve, coverage_ok
+from clockify_rag.indexing import build
 from clockify_rag.answer import (
     apply_mmr_diversification,
     apply_reranking,
