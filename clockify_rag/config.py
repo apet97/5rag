@@ -26,7 +26,12 @@ BM25_K1 = float(os.environ.get("BM25_K1", "1.0"))
 BM25_B = float(os.environ.get("BM25_B", "0.65"))
 
 # ====== LLM CONFIG ======
-DEFAULT_NUM_CTX = 8192
+# FIX: Increase DEFAULT_NUM_CTX from 8192 to 16384 to support CTX_TOKEN_BUDGET of 6000
+# pack_snippets enforces effective_budget = min(CTX_TOKEN_BUDGET, num_ctx * 0.6)
+# With old value of 8192: effective = min(6000, 4915) = 4915 ❌
+# With new value of 16384: effective = min(6000, 9830) = 6000 ✅
+# Still well within Qwen 32B's 32K context window capacity
+DEFAULT_NUM_CTX = int(os.environ.get("DEFAULT_NUM_CTX", "16384"))  # Was 8192, now 16384
 DEFAULT_NUM_PREDICT = 512
 # FIX: Increase default retries from 0 to 2 for remote Ollama resilience
 # Remote endpoints (especially over VPN) benefit from transient error retry
