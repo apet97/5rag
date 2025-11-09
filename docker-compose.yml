@@ -1,0 +1,164 @@
+# Docker Compose configuration for Clockify RAG system
+# Includes: RAG API server and optional Ollama service
+#
+# Usage:
+#   docker-compose up -d              # Start all services
+#   docker-compose up -d api         # Start only RAG API
+#   docker-compose logs -f app       # View logs
+#   docker-compose down              # Stop all services
+
+version: "3.8"
+
+services:
+  # =========================================================================
+  # Ollama Service (Optional LLM Backend)
+  # =========================================================================
+  # Ollama provides local LLM inference. If you already have Ollama running
+  # elsewhere, you can disable this service and set OLLAMA_URL accordingly.
+  #
+  # Note: First run will download models (~5-20GB depending on model).
+  #       It's recommended to run Ollama separately on a powerful machine.
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: clockify-ollama
+    ports:
+      - "11434:11434"
+    environment:
+      # Uncomment to enable GPU acceleration (requires nvidia-docker)
+      # OLLAMA_CUDA_COMPUTE_CAPABILITY: "8.0"
+      OLLAMA_NUM_THREAD: "8"
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/version"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    # Comment out this line if you want to run Ollama separately
+    profiles: ["with-ollama"]
+
+  # =========================================================================
+  # RAG API Server
+  # =========================================================================
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: clockify-rag
+    ports:
+      - "8000:8000"
+    environment:
+      # Python settings
+      PYTHONUNBUFFERED: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+
+      # Ollama configuration
+      OLLAMA_URL: "http://ollama:11434"
+      GEN_MODEL: "qwen2.5:32b"
+      EMB_MODEL: "nomic-embed-text"
+
+      # Retrieval parameters
+      DEFAULT_TOP_K: "15"
+      DEFAULT_PACK_TOP: "8"
+      DEFAULT_THRESHOLD: "0.25"
+
+      # Context budget
+      CTX_BUDGET: "12000"
+
+      # BM25 parameters
+      BM25_K1: "1.2"
+      BM25_B: "0.65"
+
+      # Timeouts (seconds)
+      EMB_CONNECT_TIMEOUT: "3"
+      EMB_READ_TIMEOUT: "120"
+      CHAT_CONNECT_TIMEOUT: "3"
+      CHAT_READ_TIMEOUT: "180"
+
+      # Logging
+      LOG_LEVEL: "info"
+      RAG_LOG_FILE: "/app/var/logs/queries.jsonl"
+
+    volumes:
+      # Knowledge base
+      - ./knowledge_full.md:/app/knowledge_full.md:ro
+
+      # Index artifacts (persistent)
+      - ./var/index:/app/var/index
+
+      # Logs (persistent)
+      - ./var/logs:/app/var/logs
+
+      # Configuration (read-only)
+      - ./config:/app/config:ro
+
+    depends_on:
+      ollama:
+        condition: service_healthy
+        required: false
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+    restart: unless-stopped
+
+# ============================================================================
+# Volumes
+# ============================================================================
+
+volumes:
+  ollama_data:
+    driver: local
+
+# ============================================================================
+# Networks
+# ============================================================================
+
+networks:
+  default:
+    name: clockify-rag-network
+    driver: bridge
+
+# ============================================================================
+# Notes
+# ============================================================================
+#
+# Ollama Models:
+#   - quwen2.5:32b (recommended): Large, high-quality model (~20GB)
+#   - mistral (medium): ~7GB, good speed/quality tradeoff
+#   - neural-chat (small): ~4GB, fast inference
+#   - tinyllama (tiny): <1GB, very fast, lower quality
+#
+#   Download with: ollama pull <model_name>
+#
+# Docker Build:
+#   docker build -t clockify-rag:latest .
+#
+# Docker Compose Profiles:
+#   - Default: Only RAG API (expects Ollama running separately)
+#   - with-ollama: Includes Ollama service
+#
+#   docker-compose --profile with-ollama up -d
+#
+# Port Mappings:
+#   - 8000: RAG API server
+#   - 11434: Ollama API (if using docker-compose Ollama)
+#
+# Persistent Data:
+#   - ./var/index: Index artifacts (required for queries)
+#   - ./var/logs: Query logs (for audit/analysis)
+#   - ./ollama_data: Ollama models and cache
+#
+# Multi-arch Build:
+#   docker buildx build --platform linux/amd64,linux/arm64 \
+#     -t clockify-rag:latest --push .
+#
+# Local Testing:
+#   docker build -t clockify-rag:local .
+#   docker run -p 8000:8000 -e OLLAMA_URL=http://host.docker.internal:11434 clockify-rag:local
+#     (use host.docker.internal on macOS/Windows, localhost on Linux)
