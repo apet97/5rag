@@ -166,3 +166,18 @@ __all__ = [
     # Precomputed FAQ cache
     "PrecomputedCache", "build_faq_cache", "load_faq_list", "get_precomputed_cache",
 ]
+
+
+# CLI entry point for modern Typer-based interface
+def _init_cli():
+    """Initialize CLI module (lazy load to avoid import issues)."""
+    try:
+        from .cli_modern import app as cli_app
+        return cli_app
+    except ImportError:
+        # Fallback to argparse-based CLI if Typer not available
+        return None
+
+
+# Export Typer app for entry point
+app = _init_cli()
