@@ -150,24 +150,45 @@ def create_app() -> FastAPI:
 
     @app.get("/health", response_model=HealthResponse)
     async def health_check() -> HealthResponse:
-        """Health check endpoint.
+        """Enhanced health check endpoint with dependency validation.
 
-        Returns system status and connectivity.
+        Returns system status, index readiness, and Ollama connectivity.
+        Status levels:
+        - healthy: Index ready and Ollama connected
+        - degraded: Index ready but Ollama unavailable (can serve cached queries)
+        - unavailable: Index not ready (cannot serve any queries)
         """
-        # Check Ollama connectivity
+        from . import __version__
+        from pathlib import Path
+
+        # Check index files exist (belt-and-suspenders with app.state)
+        index_files_exist = all(
+            Path(f).exists() for f in ["chunks.jsonl", "vecs_n.npy", "meta.jsonl", "bm25.json"]
+        )
+        index_ready = app.state.index_ready and index_files_exist
+
+        # Check Ollama connectivity with short timeout
         ollama_ok = False
         try:
-            validate_ollama_url(config.OLLAMA_URL, timeout=3)
+            validate_ollama_url(config.OLLAMA_URL, timeout=2)
             ollama_ok = True
         except Exception:
             pass
 
+        # Determine overall status
+        if not index_ready:
+            status = "unavailable"
+        elif index_ready and ollama_ok:
+            status = "healthy"
+        else:
+            status = "degraded"
+
         return HealthResponse(
-            status="ok" if app.state.index_ready and ollama_ok else "degraded",
+            status=status,
             timestamp=datetime.now(),
-            version="5.9.1",
+            version=__version__,
             platform=f"{platform.system()} {platform.machine()}",
-            index_ready=app.state.index_ready,
+            index_ready=index_ready,
             ollama_connected=ollama_ok,
         )
 

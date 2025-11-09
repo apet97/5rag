@@ -7,7 +7,7 @@ A production-ready Retrieval-Augmented Generation system with:
 - Full offline operation
 """
 
-__version__ = "5.0.0"
+__version__ = "5.9.1"
 
 # Core exceptions
 from .exceptions import (
