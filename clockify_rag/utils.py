@@ -14,6 +14,7 @@ from contextlib import contextmanager
 from typing import Any, Dict, Optional
 
 import numpy as np
+import requests
 
 # Note: config will be imported at module level to avoid circular imports
 # For functions that need dynamic config access, we'll import inside functions
@@ -226,8 +227,10 @@ def validate_ollama_url(url: str) -> str:
     from urllib.parse import urlparse
     try:
         parsed = urlparse(url)
-        if not parsed.scheme:
-            # Assume http if no scheme
+        if not parsed.scheme or (
+            parsed.scheme not in ("http", "https") and not parsed.netloc and parsed.path
+        ):
+            # Assume http if missing or malformed scheme (e.g., "localhost:11434")
             url = "http://" + url
             parsed = urlparse(url)
         if parsed.scheme not in ("http", "https"):
@@ -241,6 +244,33 @@ def validate_ollama_url(url: str) -> str:
         return url
     except Exception as e:
         raise ValueError(f"Invalid Ollama URL '{url}': {e}")
+
+
+def check_ollama_connectivity(url: str, timeout: float) -> str:
+    """Probe the Ollama endpoint using a lightweight HTTP request.
+
+    Args:
+        url: Ollama endpoint URL. May be missing a scheme.
+        timeout: Timeout (in seconds) for the HTTP request.
+
+    Returns:
+        The normalized Ollama URL that was successfully contacted.
+
+    Raises:
+        ValueError: If the URL is invalid.
+        RuntimeError: If the Ollama endpoint cannot be reached.
+    """
+
+    normalized_url = validate_ollama_url(url)
+    probe_url = f"{normalized_url}/api/tags"
+
+    try:
+        response = requests.get(probe_url, timeout=timeout)
+        response.raise_for_status()
+    except requests.exceptions.RequestException as exc:
+        raise RuntimeError(f"Failed to connect to Ollama at {normalized_url}: {exc}") from exc
+
+    return normalized_url
 
 
 def validate_and_set_config(ollama_url=None, gen_model=None, emb_model=None, ctx_budget=None):

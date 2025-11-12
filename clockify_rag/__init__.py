@@ -30,6 +30,7 @@ from .config import (
 
 # Utility functions
 from .utils import (
+    check_ollama_connectivity,
     validate_ollama_url,
     validate_and_set_config,
     log_event,
@@ -144,7 +145,7 @@ __all__ = [
     "OLLAMA_URL", "GEN_MODEL", "EMB_MODEL", "CHUNK_CHARS",
     "DEFAULT_TOP_K", "DEFAULT_PACK_TOP", "REFUSAL_STR",
     # Utils
-    "validate_ollama_url", "validate_and_set_config",
+    "check_ollama_connectivity", "validate_ollama_url", "validate_and_set_config",
     "log_event", "compute_sha256",
     # Chunking
     "parse_articles", "build_chunks", "sliding_chunks",
