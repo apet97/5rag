@@ -363,10 +363,24 @@ def create_app() -> FastAPI:
             try:
                 logger.info(f"Starting ingest from {input_file}")
                 build(input_file, retries=2)
+
+                result = ensure_index_ready(retries=2)
+                if not result:
+                    raise RuntimeError("Index artifacts missing after build")
+
+                chunks, vecs_n, bm, hnsw = result
+                app.state.chunks = chunks
+                app.state.vecs_n = vecs_n
+                app.state.bm = bm
+                app.state.hnsw = hnsw
                 app.state.index_ready = True
                 logger.info("Ingest completed successfully")
             except Exception as e:
                 logger.error(f"Ingest failed: {e}", exc_info=True)
+                app.state.chunks = None
+                app.state.vecs_n = None
+                app.state.bm = None
+                app.state.hnsw = None
                 app.state.index_ready = False
 
         background_tasks.add_task(do_ingest)
