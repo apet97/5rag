@@ -147,11 +147,12 @@ def create_app() -> FastAPI:
 
     # Add CORS middleware if enabled
     if config.ALPHA_HYBRID is not None:  # Placeholder check
-        origins = ["*"]
+        origins = config.RAG_API_ALLOWED_ORIGINS
+        allow_credentials = "*" not in origins
         app.add_middleware(
             CORSMiddleware,
             allow_origins=origins,
-            allow_credentials=True,
+            allow_credentials=allow_credentials,
             allow_methods=["*"],
             allow_headers=["*"],
         )

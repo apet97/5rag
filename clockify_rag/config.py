@@ -81,6 +81,23 @@ def _parse_env_int(key: str, default: int, min_val: int = None, max_val: int = N
     return parsed
 
 
+# ====== API CONFIG ======
+
+
+def _parse_allowed_origins() -> list[str]:
+    """Parse comma separated CORS origins from the environment."""
+
+    raw_value = os.environ.get("RAG_API_ALLOWED_ORIGINS")
+    if not raw_value:
+        # Default to localhost addresses used during development.
+        return ["http://127.0.0.1:8000", "http://localhost:8000"]
+
+    parsed = [origin.strip() for origin in raw_value.split(",") if origin.strip()]
+    return parsed or ["http://127.0.0.1:8000", "http://localhost:8000"]
+
+
+RAG_API_ALLOWED_ORIGINS = _parse_allowed_origins()
+
 # ====== OLLAMA CONFIG ======
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
 GEN_MODEL = os.environ.get("GEN_MODEL", "qwen2.5:32b")
