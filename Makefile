@@ -1,4 +1,4 @@
-.PHONY: help venv install selftest build chat smoke clean dev test eval benchmark benchmark-quick typecheck lint format pre-commit-install pre-commit-run regen-artifacts rebuild-all
+.PHONY: help venv install selftest build chat smoke smoke-full clean dev test eval benchmark benchmark-quick typecheck lint format pre-commit-install pre-commit-run regen-artifacts rebuild-all
 
 help:
 	@echo "v4.1 Clockify RAG CLI - Make Targets"
@@ -101,7 +101,12 @@ chat:
 	source rag_env/bin/activate && python3 clockify_support_cli_final.py chat
 
 smoke:
-	@echo "Running smoke test suite..."
+	@echo "Running lightweight smoke test (mock LLM by default)..."
+	python3 scripts/smoke_rag.py $(SMOKE_ARGS)
+
+.PHONY: smoke-full
+smoke-full:
+	@echo "Running legacy shell smoke harness..."
 	bash scripts/smoke.sh
 
 test:

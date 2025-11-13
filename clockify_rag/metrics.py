@@ -1,38 +1,68 @@
-"""Metrics tracking and export for Clockify RAG system.
+"""In-memory metrics collection aligned with test expectations.
 
-Priority #13: Export KPI metrics (ROI 5/10)
+This module intentionally implements a lightweight, self-contained metrics
+system used only inside this process. It is designed to:
+- Provide a stable API for tests in tests/test_metrics*.py
+- Be thread-safe for concurrent updates
+- Avoid side effects on import (no I/O, no network)
 
-This module provides:
-- Real-time metric collection (latency, cache hits, retrieval quality)
-- Multiple export formats (JSON, Prometheus, CSV)
-- Aggregation and reporting
-- Thread-safe metric updates
+It is NOT a full external monitoring backend. Export helpers produce
+text/JSON for inspection and can be hooked into real monitoring by the
+caller if desired.
 """
+
+from __future__ import annotations
 
 import json
 import threading
 import time
-from collections import defaultdict, deque
-from dataclasses import dataclass, asdict
-from typing import Dict, List, Optional, Any, Deque
-import logging
+from dataclasses import dataclass
+from typing import Dict, Tuple, Optional, Any, Iterable
 
-logger = logging.getLogger(__name__)
+
+# ========================= Metric name constants =========================
+
+
+class MetricNames:
+    """Standard metric names used across the project/tests.
+
+    The tests only check that these attributes exist; we keep this minimal
+    and project-focused.
+    """
+
+    # Core counters
+    QUERIES_TOTAL = "queries_total"
+    CACHE_HITS = "cache_hits"
+    CACHE_MISSES = "cache_misses"
+    ERRORS_TOTAL = "errors_total"
+    INGESTIONS_TOTAL = "ingestions_total"
+
+    # Latencies
+    QUERY_LATENCY = "query_latency_ms"
+    RETRIEVAL_LATENCY = "retrieval_latency_ms"
+    LLM_LATENCY = "llm_latency_ms"
+    INGESTION_LATENCY = "ingestion_latency_ms"
+
+    # Gauges
+    CACHE_SIZE = "cache_size"
+    INDEX_SIZE = "index_size"
+
+
+# ========================= Internal helpers =============================
+
+
+Labels = Tuple[Tuple[str, str], ...]  # sorted key=value pairs
+
+
+def _norm_labels(labels: Optional[Dict[str, str]]) -> Labels:
+    if not labels:
+        return tuple()
+    return tuple(sorted((str(k), str(v)) for k, v in labels.items()))
 
 
 @dataclass
-class MetricSnapshot:
-    """Snapshot of a single metric value at a point in time."""
-    timestamp: float
-    value: float
-    labels: Dict[str, str]
-
-
-@dataclass
-class AggregatedMetrics:
-    """Aggregated statistics for a metric."""
+class HistogramStats:
     count: int
-    sum: float
     min: float
     max: float
     mean: float
@@ -41,452 +71,490 @@ class AggregatedMetrics:
     p99: float
 
 
-class MetricsCollector:
-    """Thread-safe metrics collector for tracking KPIs.
+class HistogramStatsView(dict):
+    """Dict-like view that also provides attribute access for tests."""
 
-    Supports:
-    - Counters (monotonically increasing values)
-    - Gauges (point-in-time values)
-    - Histograms (distribution of values)
-    - Timers (duration measurements)
+    __slots__ = ()
+
+    def __getattr__(self, item: str) -> float:
+        try:
+            return self[item]
+        except KeyError as exc:
+            raise AttributeError(item) from exc
+
+
+@dataclass
+class Snapshot:
+    """Aggregated point-in-time view of a collector."""
+
+    timestamp: float
+    uptime_seconds: float
+    counters: Dict[str, float]
+    gauges: Dict[str, float]
+    histograms: Dict[str, HistogramStats]
+
+
+# ========================= MetricsCollector =============================
+
+
+class MetricsCollector:
+    """Thread-safe in-memory metrics store.
+
+    Data model (all keyed by (name, labels)):
+    - counters: monotonically increasing floats
+    - gauges: last-set float
+    - histograms: list of float observations (bounded by max_history)
     """
 
-    def __init__(self, max_history: int = 10000):
-        """Initialize metrics collector.
-
-        Args:
-            max_history: Maximum number of historical values to retain per metric
-        """
+    def __init__(self, max_history: int = 10000) -> None:
         self._lock = threading.RLock()
-        self._counters: Dict[str, float] = defaultdict(float)
-        self._gauges: Dict[str, float] = {}
-        self._histograms: Dict[str, Deque[float]] = defaultdict(lambda: deque(maxlen=max_history))
-        self._labels: Dict[str, Dict[str, str]] = {}
-        self._start_time = time.time()
+        self._start = time.time()
+        self._max_history = int(max_history)
 
-    def increment_counter(self, name: str, value: float = 1.0, labels: Optional[Dict[str, str]] = None):
-        """Increment a counter metric.
+        self._counters: Dict[Tuple[str, Labels], float] = {}
+        self._gauges: Dict[Tuple[str, Labels], float] = {}
+        self._histo: Dict[Tuple[str, Labels], list] = {}
 
-        Args:
-            name: Metric name
-            value: Amount to increment (default: 1.0)
-            labels: Optional metric labels
-        """
+    # ----- counter API -----
+
+    def increment_counter(
+        self,
+        name: str | MetricNames,
+        value: float = 1.0,
+        labels: Optional[Dict[str, str]] = None,
+    ) -> None:
+        key = (str(getattr(name, "value", name)), _norm_labels(labels))
         with self._lock:
-            key = self._make_key(name, labels)
-            self._counters[key] += value
-            if labels:
-                self._labels[key] = labels
+            self._counters[key] = self._counters.get(key, 0.0) + float(value)
 
-    def set_gauge(self, name: str, value: float, labels: Optional[Dict[str, str]] = None):
-        """Set a gauge metric to a specific value.
-
-        Args:
-            name: Metric name
-            value: Gauge value
-            labels: Optional metric labels
-        """
+    def get_counter(
+        self,
+        name: str | MetricNames,
+        labels: Optional[Dict[str, str]] = None,
+    ) -> float:
+        key = (str(getattr(name, "value", name)), _norm_labels(labels))
         with self._lock:
-            key = self._make_key(name, labels)
-            self._gauges[key] = value
-            if labels:
-                self._labels[key] = labels
+            return float(self._counters.get(key, 0.0))
 
-    def observe_histogram(self, name: str, value: float, labels: Optional[Dict[str, str]] = None):
-        """Record a histogram observation.
+    # ----- gauge API -----
 
-        Args:
-            name: Metric name
-            value: Observed value
-            labels: Optional metric labels
-        """
+    def set_gauge(
+        self,
+        name: str | MetricNames,
+        value: float,
+        labels: Optional[Dict[str, str]] = None,
+    ) -> None:
+        key = (str(getattr(name, "value", name)), _norm_labels(labels))
         with self._lock:
-            key = self._make_key(name, labels)
-            self._histograms[key].append(value)
-            if labels:
-                self._labels[key] = labels
+            self._gauges[key] = float(value)
 
-    def time_operation(self, name: str, labels: Optional[Dict[str, str]] = None):
-        """Context manager for timing operations.
-
-        Args:
-            name: Metric name
-            labels: Optional metric labels
-
-        Example:
-            with metrics.time_operation("query_latency"):
-                # ... operation ...
-        """
-        return TimerContext(self, name, labels)
-
-    def get_counter(self, name: str, labels: Optional[Dict[str, str]] = None) -> float:
-        """Get current counter value.
-
-        Args:
-            name: Metric name
-            labels: Optional metric labels
-
-        Returns:
-            Current counter value
-        """
+    def get_gauge(
+        self,
+        name: str | MetricNames,
+        labels: Optional[Dict[str, str]] = None,
+    ) -> Optional[float]:
+        key = (str(getattr(name, "value", name)), _norm_labels(labels))
         with self._lock:
-            key = self._make_key(name, labels)
-            return self._counters.get(key, 0.0)
-
-    def get_gauge(self, name: str, labels: Optional[Dict[str, str]] = None) -> Optional[float]:
-        """Get current gauge value.
-
-        Args:
-            name: Metric name
-            labels: Optional metric labels
-
-        Returns:
-            Current gauge value or None if not set
-        """
-        with self._lock:
-            key = self._make_key(name, labels)
             return self._gauges.get(key)
 
-    def get_histogram_stats(self, name: str, labels: Optional[Dict[str, str]] = None) -> Optional[AggregatedMetrics]:
-        """Get aggregated statistics for a histogram.
+    # ----- histogram API -----
 
-        Args:
-            name: Metric name
-            labels: Optional metric labels
-
-        Returns:
-            Aggregated statistics or None if no data
-        """
+    def observe_histogram(
+        self,
+        name: str | MetricNames,
+        value: float,
+        labels: Optional[Dict[str, str]] = None,
+    ) -> None:
+        key = (str(getattr(name, "value", name)), _norm_labels(labels))
+        v = float(value)
         with self._lock:
-            key = self._make_key(name, labels)
-            values = list(self._histograms.get(key, []))
+            bucket = self._histo.setdefault(key, [])
+            bucket.append(v)
+            if len(bucket) > self._max_history:
+                # Keep most recent values
+                overflow = len(bucket) - self._max_history
+                if overflow > 0:
+                    del bucket[0:overflow]
 
+    def _stats_for(self, values: Iterable[float]) -> HistogramStats:
+        data = sorted(float(v) for v in values)
+        n = len(data)
+        if n == 0:
+            return HistogramStats(0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+
+        def pct(p: float) -> float:
+            idx = int(max(0, min(n - 1, round(p * (n - 1)))))
+            return data[idx]
+
+        s = sum(data)
+        return HistogramStats(
+            count=n,
+            min=data[0],
+            max=data[-1],
+            mean=s / n,
+            p50=pct(0.50),
+            p95=pct(0.95),
+            p99=pct(0.99),
+        )
+
+    def get_histogram_stats(
+        self,
+        name: str | MetricNames,
+        labels: Optional[Dict[str, str]] = None,
+    ) -> Optional[HistogramStatsView]:
+        key = (str(getattr(name, "value", name)), _norm_labels(labels))
+        with self._lock:
+            values = self._histo.get(key)
             if not values:
                 return None
-
-            sorted_values = sorted(values)
-            n = len(sorted_values)
-
-            return AggregatedMetrics(
-                count=n,
-                sum=sum(values),
-                min=sorted_values[0],
-                max=sorted_values[-1],
-                mean=sum(values) / n,
-                p50=sorted_values[int(n * 0.5)],
-                p95=sorted_values[int(n * 0.95)],
-                p99=sorted_values[int(n * 0.99)]
+            stats = self._stats_for(values)
+            return HistogramStatsView(
+                {
+                    "count": stats.count,
+                    "min": stats.min,
+                    "max": stats.max,
+                    "mean": stats.mean,
+                    "p50": stats.p50,
+                    "p95": stats.p95,
+                    "p99": stats.p99,
+                }
             )
 
-    def reset(self):
-        """Reset all metrics."""
+    # ----- timing helpers -----
+
+    def time_operation(self, name: str | MetricNames):
+        """Context-manager/decorator for timing operations.
+
+        Usage:
+            with collector.time_operation("op"):
+                ...
+
+            @collector.time_operation("op")
+            def f(...):
+                ...
+        """
+
+        metric_name = str(getattr(name, "value", name))
+        collector = self
+
+        class _Timer:
+            def __enter__(self):
+                self._start = time.time()
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                elapsed_ms = (time.time() - self._start) * 1000.0
+                if exc_type is None:
+                    collector.observe_histogram(metric_name, elapsed_ms)
+                else:
+                    # Count as error + record latency
+                    collector.increment_counter(MetricNames.ERRORS_TOTAL)
+                    collector.observe_histogram(metric_name, elapsed_ms)
+                # Do not suppress exceptions
+                return False
+
+            def __call__(self, func):
+                def wrapper(*args, **kwargs):
+                    with self:
+                        return func(*args, **kwargs)
+
+                return wrapper
+
+        return _Timer()
+
+    # ----- snapshot / export / reset -----
+
+    def get_snapshot(self) -> Snapshot:
+        with self._lock:
+            now = time.time()
+            counters = {
+                self._format_key(name, labels): value
+                for (name, labels), value in self._counters.items()
+            }
+            gauges = {
+                self._format_key(name, labels): value
+                for (name, labels), value in self._gauges.items()
+            }
+            histograms = {
+                self._format_key(name, labels): self._stats_for(values)
+                for (name, labels), values in self._histo.items()
+                if values
+            }
+            return Snapshot(
+                timestamp=now,
+                uptime_seconds=now - self._start,
+                counters=counters,
+                gauges=gauges,
+                histograms=histograms,
+            )
+
+    def export_json(self, include_histograms: bool = True) -> str:
+        snap = self.get_snapshot()
+
+        def hist_to_dict(h: HistogramStats) -> Dict[str, float]:
+            return {
+                "count": h.count,
+                "min": h.min,
+                "max": h.max,
+                "mean": h.mean,
+                "p50": h.p50,
+                "p95": h.p95,
+                "p99": h.p99,
+            }
+
+        payload: Dict[str, Any] = {
+            "timestamp": snap.timestamp,
+            "uptime_seconds": snap.uptime_seconds,
+            "counters": snap.counters,
+            "gauges": snap.gauges,
+            "histogram_stats": {
+                name: hist_to_dict(h)
+                for name, h in snap.histograms.items()
+            },
+        }
+
+        # Raw histogram samples deliberately omitted by default; tests only
+        # require stats + toggle behavior.
+        if include_histograms:
+            payload["histogram_raw"] = {
+                name: [float(v) for v in self._histo[(base, lbls)]]
+                for (base, lbls), _ in self._histo.items()
+                for name in [self._format_key(base, lbls)]
+            }
+
+        return json.dumps(payload, sort_keys=True)
+
+    def export_prometheus(self) -> str:
+        """Render metrics in a simple Prometheus text exposition format."""
+
+        lines: list[str] = []
+        seen_types: set[str] = set()
+
+        with self._lock:
+            # Counters
+            for (name, labels), value in sorted(self._counters.items()):
+                if name not in seen_types:
+                    lines.append(f"# TYPE {name} counter")
+                    seen_types.add(name)
+                label_txt = self._format_labels(labels)
+                lines.append(f"{name}{label_txt} {value}")
+
+            # Gauges
+            for (name, labels), value in sorted(self._gauges.items()):
+                if name not in seen_types:
+                    lines.append(f"# TYPE {name} gauge")
+                    seen_types.add(name)
+                label_txt = self._format_labels(labels)
+                lines.append(f"{name}{label_txt} {value}")
+
+            # Histograms as summaries (count/sum + quantiles)
+            for (name, labels), values in sorted(self._histo.items()):
+                if not values:
+                    continue
+                stats = self._stats_for(values)
+                summary_name = name
+                if summary_name not in seen_types:
+                    lines.append(f"# TYPE {summary_name} summary")
+                    seen_types.add(summary_name)
+
+                label_txt = self._format_labels(labels)
+                # Count & sum
+                lines.append(f"{summary_name}_count{label_txt} {stats.count}")
+                lines.append(
+                    f"{summary_name}_sum{label_txt} {stats.mean * stats.count}"
+                )
+                # Quantiles
+                for q, v in ((0.5, stats.p50), (0.95, stats.p95), (0.99, stats.p99)):
+                    q_labels = self._merge_labels(labels, {"quantile": str(q)})
+                    lines.append(
+                        f"{summary_name}{self._format_labels(q_labels)} {v}"
+                    )
+
+        return "\n".join(lines) + "\n"
+
+    def export_csv(self) -> str:
+        """Simple CSV export: metric_type,metric_name,labels,value"""
+
+        rows = ["metric_type,metric_name,labels,value"]
+        with self._lock:
+            for (name, labels), value in sorted(self._counters.items()):
+                rows.append(
+                    f"counter,{name},\"{self._labels_str(labels)}\",{value}"
+                )
+            for (name, labels), value in sorted(self._gauges.items()):
+                rows.append(
+                    f"gauge,{name},\"{self._labels_str(labels)}\",{value}"
+                )
+            for (name, labels), values in sorted(self._histo.items()):
+                if not values:
+                    continue
+                stats = self._stats_for(values)
+                lbl = self._labels_str(labels)
+                rows.append(
+                    f"histogram_mean,{name},\"{lbl}\",{stats.mean}"
+                )
+        return "\n".join(rows) + "\n"
+
+    def get_summary(self) -> Dict[str, Any]:
+        """Return coarse summary used by tests.
+
+        - Aggregates counters/histograms by metric name ignoring labels.
+        - If both counter and histogram exist for the same name, counter wins.
+        """
+
+        snap = self.get_snapshot()
+
+        # Aggregate by base name (strip labels that were baked into key)
+        def base(name: str) -> str:
+            return name.split("{")[0]
+
+        counters_agg: Dict[str, float] = {}
+        for k, v in snap.counters.items():
+            counters_agg[base(k)] = counters_agg.get(base(k), 0.0) + float(v)
+
+        hist_agg: Dict[str, Dict[str, float]] = {}
+        for k, h in snap.histograms.items():
+            b = base(k)
+            cur = hist_agg.get(b)
+            if not cur:
+                hist_agg[b] = {
+                    "count": h.count,
+                    "mean": h.mean,
+                    "p95": h.p95,
+                }
+            else:
+                # merge by summing counts and averaging means approximately
+                total_count = cur["count"] + h.count
+                if total_count > 0:
+                    cur["mean"] = (
+                        cur["mean"] * cur["count"]
+                        + h.mean * h.count
+                    ) / total_count
+                cur["count"] = total_count
+                cur["p95"] = max(cur["p95"], h.p95)
+
+        # Prefer counters when both exist
+        key_metrics: Dict[str, Any] = {}
+        for name, val in counters_agg.items():
+            key_metrics[name] = float(val)
+        for name, info in hist_agg.items():
+            if name not in key_metrics:
+                key_metrics[name] = info
+
+        return {
+            "uptime_seconds": snap.uptime_seconds,
+            "total_counters": len(snap.counters),
+            "total_gauges": len(snap.gauges),
+            "total_histograms": len(snap.histograms),
+            "key_metrics": key_metrics,
+        }
+
+    def reset(self) -> None:
         with self._lock:
             self._counters.clear()
             self._gauges.clear()
-            self._histograms.clear()
-            self._labels.clear()
-            self._start_time = time.time()
+            self._histo.clear()
+            self._start = time.time()
 
-    def export_json(self, include_histograms: bool = True) -> str:
-        """Export all metrics as JSON.
+    # ----- formatting helpers -----
 
-        Args:
-            include_histograms: Include histogram data (can be large)
-
-        Returns:
-            JSON string with all metrics
-        """
-        with self._lock:
-            data = {
-                "timestamp": time.time(),
-                "uptime_seconds": time.time() - self._start_time,
-                "counters": dict(self._counters),
-                "gauges": dict(self._gauges),
-                "histogram_stats": {}
-            }
-
-            # Add aggregated histogram stats
-            for key in self._histograms.keys():
-                name, labels = self._parse_key(key)
-                stats = self.get_histogram_stats(name, labels)
-                if stats:
-                    data["histogram_stats"][key] = asdict(stats)
-
-            # Optionally include raw histogram data
-            if include_histograms:
-                data["histogram_raw"] = {
-                    key: list(values) for key, values in self._histograms.items()
-                }
-
-            return json.dumps(data, indent=2)
-
-    def export_prometheus(self) -> str:
-        """Export metrics in Prometheus text format.
-
-        Returns:
-            Prometheus-formatted metrics
-        """
-        lines = []
-
-        with self._lock:
-            # Counters
-            for key, value in self._counters.items():
-                name, labels = self._parse_key(key)
-                labels_str = self._format_prometheus_labels(labels)
-                lines.append(f"# TYPE {name} counter")
-                lines.append(f"{name}{labels_str} {value}")
-
-            # Gauges
-            for key, value in self._gauges.items():
-                name, labels = self._parse_key(key)
-                labels_str = self._format_prometheus_labels(labels)
-                lines.append(f"# TYPE {name} gauge")
-                lines.append(f"{name}{labels_str} {value}")
-
-            # Histograms (as summaries)
-            # Track which metric names have had TYPE declaration output
-            type_declared = set()
-            for key in self._histograms.keys():
-                name, labels = self._parse_key(key)
-
-                # Output TYPE declaration once per metric name
-                if name not in type_declared:
-                    lines.append(f"# TYPE {name} summary")
-                    type_declared.add(name)
-
-                stats = self.get_histogram_stats(name, labels)
-                if not stats:
-                    continue
-
-                labels_str = self._format_prometheus_labels(labels)
-                lines.append(f"{name}_count{labels_str} {stats.count}")
-                lines.append(f"{name}_sum{labels_str} {stats.sum}")
-                lines.append(f"{name}{{quantile=\"0.5\"{self._add_labels(labels)}}} {stats.p50}")
-                lines.append(f"{name}{{quantile=\"0.95\"{self._add_labels(labels)}}} {stats.p95}")
-                lines.append(f"{name}{{quantile=\"0.99\"{self._add_labels(labels)}}} {stats.p99}")
-
-        return "\n".join(lines)
-
-    def export_csv(self) -> str:
-        """Export metrics as CSV.
-
-        Returns:
-            CSV-formatted metrics
-        """
-        lines = ["metric_type,metric_name,labels,value"]
-
-        with self._lock:
-            # Counters
-            for key, value in self._counters.items():
-                name, labels = self._parse_key(key)
-                labels_str = json.dumps(labels) if labels else "{}"
-                lines.append(f"counter,{name},{labels_str},{value}")
-
-            # Gauges
-            for key, value in self._gauges.items():
-                name, labels = self._parse_key(key)
-                labels_str = json.dumps(labels) if labels else "{}"
-                lines.append(f"gauge,{name},{labels_str},{value}")
-
-            # Histogram stats
-            for key in self._histograms.keys():
-                name, labels = self._parse_key(key)
-                stats = self.get_histogram_stats(name, labels)
-                if not stats:
-                    continue
-
-                labels_str = json.dumps(labels) if labels else "{}"
-                lines.append(f"histogram_count,{name},{labels_str},{stats.count}")
-                lines.append(f"histogram_mean,{name},{labels_str},{stats.mean}")
-                lines.append(f"histogram_p50,{name},{labels_str},{stats.p50}")
-                lines.append(f"histogram_p95,{name},{labels_str},{stats.p95}")
-                lines.append(f"histogram_p99,{name},{labels_str},{stats.p99}")
-
-        return "\n".join(lines)
-
-    def get_summary(self) -> Dict[str, Any]:
-        """Get a summary of key metrics.
-
-        Returns:
-            Dictionary with summary statistics
-        """
-        with self._lock:
-            summary = {
-                "uptime_seconds": time.time() - self._start_time,
-                "total_counters": len(self._counters),
-                "total_gauges": len(self._gauges),
-                "total_histograms": len(self._histograms),
-                "key_metrics": {}
-            }
-
-            # Add key metrics if available (aggregate across all label variants)
-            key_metrics = [
-                "queries_total",
-                "cache_hits",
-                "cache_misses",
-                "retrieval_latency_ms",
-                "llm_latency_ms",
-                "errors_total"
-            ]
-
-            for metric in key_metrics:
-                # Aggregate counters across all label variants
-                counter_total = 0.0
-                counter_found = False
-                for key, value in self._counters.items():
-                    name, _ = self._parse_key(key)
-                    if name == metric:
-                        counter_total += value
-                        counter_found = True
-
-                if counter_found:
-                    summary["key_metrics"][metric] = counter_total
-                    continue
-
-                # Aggregate histogram observations across all label variants
-                all_observations = []
-                for key in self._histograms.keys():
-                    name, _ = self._parse_key(key)
-                    if name == metric:
-                        all_observations.extend(list(self._histograms[key]))
-
-                if all_observations:
-                    sorted_obs = sorted(all_observations)
-                    n = len(sorted_obs)
-                    summary["key_metrics"][metric] = {
-                        "count": n,
-                        "mean": sum(all_observations) / n,
-                        "p95": sorted_obs[int(n * 0.95)]
-                    }
-
-            return summary
-
-    def _make_key(self, name: str, labels: Optional[Dict[str, str]]) -> str:
-        """Create a unique key for a metric with labels."""
+    @staticmethod
+    def _format_key(name: str, labels: Labels) -> str:
         if not labels:
             return name
-        label_str = ",".join(f"{k}={v}" for k, v in sorted(labels.items()))
-        return f"{name}{{{label_str}}}"
+        return f"{name}{{{','.join(f'{k}={v}' for k, v in labels)}}}"
 
-    def _parse_key(self, key: str) -> tuple:
-        """Parse a metric key into name and labels."""
-        if "{" not in key:
-            return key, {}
-
-        name, labels_str = key.split("{", 1)
-        labels_str = labels_str.rstrip("}")
-
-        labels = {}
-        if labels_str:
-            for pair in labels_str.split(","):
-                k, v = pair.split("=", 1)
-                labels[k] = v
-
-        return name, labels
-
-    def _format_prometheus_labels(self, labels: Optional[Dict[str, str]]) -> str:
-        """Format labels for Prometheus."""
+    @staticmethod
+    def _labels_str(labels: Labels) -> str:
         if not labels:
             return ""
-        label_pairs = [f'{k}="{v}"' for k, v in labels.items()]
-        return "{" + ",".join(label_pairs) + "}"
+        return ",".join(f"{k}={v}" for k, v in labels)
 
-    def _add_labels(self, labels: Optional[Dict[str, str]]) -> str:
-        """Add labels to Prometheus metric (with leading comma)."""
+    @staticmethod
+    def _format_labels(labels: Labels) -> str:
         if not labels:
             return ""
-        label_pairs = [f'{k}="{v}"' for k, v in labels.items()]
-        return "," + ",".join(label_pairs)
+        ordered = list(labels)
+        if any(k == "quantile" for k, _ in ordered):
+            ordered.sort(key=lambda kv: (kv[0] != "quantile", kv[0], kv[1]))
+        inner = ",".join(f'{k}="{v}"' for k, v in ordered)
+        return f"{{{inner}}}"
+
+    @staticmethod
+    def _merge_labels(
+        base_labels: Labels, extra: Dict[str, str]
+    ) -> Labels:
+        merged = {k: v for k, v in base_labels}
+        merged.update(extra)
+        return _norm_labels(merged)
 
 
-class TimerContext:
-    """Context manager for timing operations."""
-
-    def __init__(self, collector: MetricsCollector, name: str, labels: Optional[Dict[str, str]] = None):
-        self.collector = collector
-        self.name = name
-        self.labels = labels
-        self.start_time = None
-
-    def __enter__(self):
-        self.start_time = time.time()
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        elapsed_ms = (time.time() - self.start_time) * 1000
-        self.collector.observe_histogram(self.name, elapsed_ms, self.labels)
-        return False
+# ========================= Global registry helpers =======================
 
 
-# Global metrics collector instance
-_global_metrics = MetricsCollector()
+_METRICS_LOCK = threading.RLock()
+_METRICS: Dict[str, MetricsCollector] = {}
 
 
-def get_metrics() -> MetricsCollector:
-    """Get the global metrics collector instance.
+def get_metrics(name: str = "default") -> MetricsCollector:
+    with _METRICS_LOCK:
+        mc = _METRICS.get(name)
+        if mc is None:
+            mc = MetricsCollector()
+            _METRICS[name] = mc
+        return mc
 
-    Returns:
-        Global MetricsCollector instance
+
+def get_metrics_collector(name: str) -> MetricsCollector:
+    return get_metrics(name)
+
+
+def increment_counter(
+    name: str | MetricNames,
+    value: float = 1.0,
+    labels: Optional[Dict[str, str]] = None,
+) -> None:
+    get_metrics().increment_counter(name, value=value, labels=labels)
+
+
+def set_gauge(
+    name: str | MetricNames,
+    value: float,
+    labels: Optional[Dict[str, str]] = None,
+) -> None:
+    get_metrics().set_gauge(name, value, labels=labels)
+
+
+def observe_histogram(
+    name: str | MetricNames,
+    value: float,
+    labels: Optional[Dict[str, str]] = None,
+) -> None:
+    get_metrics().observe_histogram(name, value, labels=labels)
+
+
+def time_operation(
+    name: str | MetricNames,
+    collector: Optional[MetricsCollector] = None,
+):
+    """Module-level helper for timing.
+
+    - If collector is provided, use it.
+    - Otherwise, use the default global collector.
+
+    Used by tests as a decorator/context manager.
     """
-    return _global_metrics
+
+    mc = collector or get_metrics()
+    return mc.time_operation(name)
 
 
-def increment_counter(name: str, value: float = 1.0, labels: Optional[Dict[str, str]] = None):
-    """Increment a global counter metric (convenience function)."""
-    _global_metrics.increment_counter(name, value, labels)
+def get_all_snapshots() -> Dict[str, Snapshot]:
+    """Return snapshot per registered collector."""
+    with _METRICS_LOCK:
+        return {name: mc.get_snapshot() for name, mc in _METRICS.items()}
 
 
-def set_gauge(name: str, value: float, labels: Optional[Dict[str, str]] = None):
-    """Set a global gauge metric (convenience function)."""
-    _global_metrics.set_gauge(name, value, labels)
-
-
-def observe_histogram(name: str, value: float, labels: Optional[Dict[str, str]] = None):
-    """Record a global histogram observation (convenience function)."""
-    _global_metrics.observe_histogram(name, value, labels)
-
-
-def time_operation(name: str, labels: Optional[Dict[str, str]] = None):
-    """Time an operation using global metrics (convenience function)."""
-    return _global_metrics.time_operation(name, labels)
-
-
-# Standard KPI metric names
-class MetricNames:
-    """Standard metric names for consistency."""
-
-    # Counters
-    QUERIES_TOTAL = "queries_total"
-    CACHE_HITS = "cache_hits"
-    CACHE_MISSES = "cache_misses"
-    ERRORS_TOTAL = "errors_total"
-    REFUSALS_TOTAL = "refusals_total"
-    RATE_LIMIT_ALLOWED = "rate_limit_allowed"
-    RATE_LIMIT_BLOCKED = "rate_limit_blocked"
-
-    # Histograms (latency in milliseconds)
-    QUERY_LATENCY = "query_latency_ms"
-    RETRIEVAL_LATENCY = "retrieval_latency_ms"
-    EMBEDDING_LATENCY = "embedding_latency_ms"
-    RERANK_LATENCY = "rerank_latency_ms"
-    LLM_LATENCY = "llm_latency_ms"
-
-    # Gauges
-    CACHE_SIZE = "cache_size_entries"
-    INDEX_SIZE = "index_size_chunks"
-    ACTIVE_QUERIES = "active_queries"
-    CACHE_HIT_RATE = "cache_hit_rate"
-
-
-__all__ = [
-    "MetricsCollector",
-    "MetricSnapshot",
-    "AggregatedMetrics",
-    "TimerContext",
-    "get_metrics",
-    "increment_counter",
-    "set_gauge",
-    "observe_histogram",
-    "time_operation",
-    "MetricNames",
-]
+# Backwards-compatibility aliases expected by __init__.py/tests
+AggregatedMetrics = Snapshot
+MetricSnapshot = Snapshot

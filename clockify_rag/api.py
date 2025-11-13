@@ -193,6 +193,8 @@ class QueryResponse(BaseModel):
     routing: Optional[Dict[str, Any]] = Field(default=None, description="Routing recommendation metadata")
     timestamp: datetime
     processing_time_ms: float
+    refused: bool = Field(False, description="True when the answer is a refusal/fallback")
+    timing: Optional[Dict[str, Any]] = Field(None, description="Latency breakdown in milliseconds")
 
 
 class HealthResponse(BaseModel):
@@ -497,6 +499,8 @@ def create_app() -> FastAPI:
                 routing=result.get("routing"),
                 timestamp=datetime.now(),
                 processing_time_ms=elapsed_ms,
+                refused=result.get("refused", False),
+                timing=result.get("timing"),
             )
 
         except ValidationError as exc:

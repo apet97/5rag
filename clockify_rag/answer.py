@@ -10,6 +10,7 @@ This module contains the complete answer generation pipeline:
 - Complete answer_once workflow
 """
 
+import hashlib
 import json
 import logging
 import time
@@ -36,9 +37,10 @@ from .retrieval import (
     coverage_ok,
     ask_llm,
 )
-from .exceptions import LLMError
+from .exceptions import LLMError, LLMUnavailableError
 from .confidence_routing import get_routing_action
-from .metrics import increment_counter, observe_histogram, MetricNames
+from .metrics import get_metrics, MetricNames
+from .utils import sanitize_for_log
 
 logger = logging.getLogger(__name__)
 
@@ -366,7 +368,17 @@ def answer_once(
         Dict with answer and metadata
     """
     t_start = time.time()
-    increment_counter(MetricNames.QUERIES_TOTAL)
+    metrics = get_metrics()
+    metrics.increment_counter(MetricNames.QUERIES_TOTAL)
+    question_preview = sanitize_for_log(question, max_length=200)
+    question_hash = hashlib.sha256(question.encode("utf-8")).hexdigest()[:12]
+    logger.info(json.dumps({
+        "event": "rag.query.start",
+        "question_hash": question_hash,
+        "question_preview": question_preview,
+        "top_k": top_k,
+        "pack_top": pack_top,
+    }))
 
     # Retrieve
     t0 = time.time()
@@ -376,13 +388,17 @@ def answer_once(
         faiss_index_path=faiss_index_path
     )
     retrieve_time = time.time() - t0
-    observe_histogram(MetricNames.RETRIEVAL_LATENCY, retrieve_time * 1000.0)
+    selected_chunk_ids = _resolve_chunk_ids(chunks, selected)
 
     # Check coverage
     if not coverage_ok(selected, scores["dense"], threshold):
-        total_ms = (time.time() - t_start) * 1000.0
-        observe_histogram(MetricNames.QUERY_LATENCY, total_ms)
-        increment_counter(MetricNames.REFUSALS_TOTAL, labels={"stage": "coverage"})
+        metrics.increment_counter(MetricNames.ERRORS_TOTAL, labels={"type": "coverage"})
+        logger.warning(json.dumps({
+            "event": "rag.query.coverage_failure",
+            "question_hash": question_hash,
+            "selected": len(selected),
+            "threshold": threshold,
+        }))
         return {
             "answer": REFUSAL_STR,
             "refused": True,
@@ -402,7 +418,8 @@ def answer_once(
             "metadata": {
                 "retrieval_count": len(selected),
                 "coverage_check": "failed"
-            }
+            },
+            "routing": get_routing_action(None, refused=True, critical=False),
         }
 
     # Apply MMR diversification
@@ -420,30 +437,81 @@ def answer_once(
     context_block, packed_ids, used_tokens = pack_snippets(
         chunks, mmr_selected, pack_top=pack_top, num_ctx=num_ctx
     )
-
-    selected_chunk_ids = _resolve_chunk_ids(chunks, selected)
     packed_chunk_ids = list(packed_ids or [])
 
+    def _llm_failure(reason: str, error: Exception) -> Dict[str, Any]:
+        total_time = time.time() - t_start
+        metrics.increment_counter(MetricNames.ERRORS_TOTAL, labels={"type": reason})
+        logger.error(json.dumps({
+            "event": "rag.query.failure",
+            "reason": reason,
+            "question_hash": question_hash,
+            "message": str(error),
+        }))
+        return {
+            "answer": REFUSAL_STR,
+            "refused": True,
+            "confidence": None,
+            "selected_chunks": selected,
+            "selected_chunk_ids": selected_chunk_ids,
+            "packed_chunks": mmr_selected,
+            "packed_chunk_ids": packed_chunk_ids,
+            "context_block": context_block,
+            "timing": {
+                "total_ms": total_time * 1000,
+                "retrieve_ms": retrieve_time * 1000,
+                "mmr_ms": mmr_time * 1000,
+                "rerank_ms": rerank_time * 1000,
+                "llm_ms": 0,
+            },
+            "metadata": {
+                "retrieval_count": len(selected),
+                "packed_count": len(packed_ids),
+                "used_tokens": used_tokens,
+                "rerank_applied": rerank_applied,
+                "rerank_reason": rerank_reason,
+                "llm_error": reason,
+                "llm_error_msg": str(error),
+            },
+            "routing": get_routing_action(None, refused=True, critical=True),
+        }
+
     # Generate answer
-    answer, llm_time, confidence = generate_llm_answer(
-        question, context_block,
-        seed=seed, num_ctx=num_ctx, num_predict=num_predict,
-        retries=retries, packed_ids=packed_ids
-    )
+    try:
+        answer, llm_time, confidence = generate_llm_answer(
+            question, context_block,
+            seed=seed, num_ctx=num_ctx, num_predict=num_predict,
+            retries=retries, packed_ids=packed_ids
+        )
+    except LLMUnavailableError as exc:
+        logger.error(f"LLM unavailable during answer generation: {exc}")
+        return _llm_failure("llm_unavailable", exc)
+    except LLMError as exc:
+        logger.error(f"LLM error during answer generation: {exc}")
+        return _llm_failure("llm_error", exc)
 
     total_time = time.time() - t_start
+    metrics.observe_histogram(MetricNames.QUERY_LATENCY, total_time * 1000)
+    metrics.observe_histogram(MetricNames.RETRIEVAL_LATENCY, retrieve_time * 1000)
+    metrics.observe_histogram(MetricNames.LLM_LATENCY, llm_time * 1000)
+
+    refused = (answer == REFUSAL_STR)
+    if refused:
+        metrics.increment_counter(MetricNames.ERRORS_TOTAL, labels={"type": "refused"})
+    logger.info(json.dumps({
+        "event": "rag.query.complete",
+        "question_hash": question_hash,
+        "refused": refused,
+        "selected": len(selected),
+        "packed": len(packed_ids),
+        "confidence": confidence,
+        "total_ms": round(total_time * 1000, 2),
+        "llm_ms": round(llm_time * 1000, 2),
+    }))
 
     # OPTIMIZATION (Analysis Section 9.1 #4): Confidence-based routing
     # Auto-escalate low-confidence queries to human review
-    refused = (answer == REFUSAL_STR)
     routing = get_routing_action(confidence, refused=refused, critical=False)
-
-    observe_histogram(MetricNames.RERANK_LATENCY, rerank_time * 1000.0)
-    observe_histogram(MetricNames.LLM_LATENCY, llm_time * 1000.0)
-    observe_histogram(MetricNames.QUERY_LATENCY, total_time * 1000.0)
-
-    if refused:
-        increment_counter(MetricNames.REFUSALS_TOTAL, labels={"stage": "llm"})
 
     return {
         "answer": answer,
@@ -472,7 +540,19 @@ def answer_once(
     }
 
 
-def answer_to_json(answer: str, citations: list, used_tokens: int | None, topk: int, packed: int, confidence: int | None = None) -> dict:
+def answer_to_json(
+    answer: str,
+    citations: list,
+    used_tokens: int | None,
+    topk: int,
+    packed: int,
+    confidence: int | None = None,
+    *,
+    metadata: Optional[Dict[str, Any]] = None,
+    routing: Optional[Dict[str, Any]] = None,
+    timing: Optional[Dict[str, Any]] = None,
+    refused: bool = False,
+) -> dict:
     """Convert answer and metadata to JSON structure.
 
     Args:
@@ -486,9 +566,24 @@ def answer_to_json(answer: str, citations: list, used_tokens: int | None, topk: 
     from .config import KPI, EMB_BACKEND, USE_ANN, ALPHA_HYBRID
 
     budget_tokens = 0 if used_tokens is None else int(used_tokens)
-    result = {
+    metadata_payload = metadata or {}
+    routing_payload = routing or {}
+    timing_payload = timing or {
+        "retrieve_ms": KPI.retrieve_ms,
+        "ann_ms": KPI.ann_ms,
+        "rerank_ms": KPI.rerank_ms,
+        "llm_ms": KPI.ask_ms,
+        "total_ms": KPI.retrieve_ms + KPI.rerank_ms + KPI.ask_ms,
+    }
+
+    result: Dict[str, Any] = {
         "answer": answer,
         "citations": citations,
+        "confidence": confidence,
+        "refused": refused,
+        "metadata": metadata_payload,
+        "routing": routing_payload,
+        "timing": timing_payload,
         "debug": {
             "meta": {
                 "used_tokens": budget_tokens,
@@ -496,21 +591,15 @@ def answer_to_json(answer: str, citations: list, used_tokens: int | None, topk: 
                 "packed": packed,
                 "emb_backend": EMB_BACKEND,
                 "ann": USE_ANN,
-                "alpha": ALPHA_HYBRID
+                "alpha": ALPHA_HYBRID,
             },
-            "timing": {
-                "retrieve_ms": KPI.retrieve_ms,
-                "ann_ms": KPI.ann_ms,
-                "rerank_ms": KPI.rerank_ms,
-                "ask_ms": KPI.ask_ms,
-                "total_ms": KPI.retrieve_ms + KPI.rerank_ms + KPI.ask_ms
-            }
-        }
+            "timing": timing_payload,
+        },
     }
 
-    # Include confidence if available
-    if confidence is not None:
-        result["confidence"] = confidence
+    # Drop confidence key if None to keep payload tidy
+    if confidence is None:
+        result.pop("confidence", None)
 
     return result
 
