@@ -18,6 +18,7 @@ from .embedding import embed_texts, embed_local_batch, load_embedding_cache, sav
 from .exceptions import BuildError
 from .utils import (build_lock, atomic_write_jsonl, atomic_save_npy, atomic_write_json,
                    tokenize, compute_sha256, _fsync_dir)
+from .metrics import get_metrics, MetricNames
 
 logger = logging.getLogger(__name__)
 
@@ -71,9 +72,10 @@ def build_faiss_index(vecs: np.ndarray, nlist: int = 256, metric: str = "ip") ->
             else:
                 train_vecs = vecs_f32
 
-            # Seed FAISS k-means for deterministic training
+            # Seed for deterministic training
             # FAISS has internal randomness in k-means clustering that needs explicit seeding
-            faiss.seed(config.DEFAULT_SEED)
+            import numpy as np
+            np.random.seed(config.DEFAULT_SEED)
             index.train(train_vecs)
             index.add(vecs_f32)
 
@@ -96,9 +98,10 @@ def build_faiss_index(vecs: np.ndarray, nlist: int = 256, metric: str = "ip") ->
         train_indices = rng.choice(len(vecs), train_size, replace=False)
         train_vecs = vecs_f32[train_indices]
 
-        # Seed FAISS k-means for deterministic training
+        # Seed for deterministic training
         # FAISS has internal randomness in k-means clustering that needs explicit seeding
-        faiss.seed(config.DEFAULT_SEED)
+        import numpy as np
+        np.random.seed(config.DEFAULT_SEED)
         index.train(train_vecs)
         index.add(vecs_f32)
 
@@ -288,6 +291,14 @@ def build(md_path: str, retries=0):
         logger.info("=" * 70)
         if not os.path.exists(md_path):
             raise BuildError(f"{md_path} not found")
+        metrics = get_metrics()
+        metrics.increment_counter(MetricNames.INGESTIONS_TOTAL)
+        ingest_start = time.time()
+        logger.info(json.dumps({
+            "event": "rag.ingest.start",
+            "md_path": md_path,
+            "backend": config.EMB_BACKEND,
+        }))
 
         logger.info("\n[1/4] Parsing and chunking...")
         chunks = build_chunks(md_path)
@@ -414,8 +425,8 @@ def build(md_path: str, retries=0):
             "chunks": len(chunks),
             "emb_rows": int(vecs_n.shape[0]),
             "bm25_docs": len(bm["doc_lens"]),
-            "gen_model": config.GEN_MODEL,
-            "emb_model": config.EMB_MODEL if config.EMB_BACKEND == "ollama" else "all-MiniLM-L6-v2",
+            "gen_model": config.RAG_CHAT_MODEL,
+            "emb_model": config.RAG_EMBED_MODEL if config.EMB_BACKEND == "ollama" else "all-MiniLM-L6-v2",
             "emb_backend": config.EMB_BACKEND,
             "ann": config.USE_ANN,
             "built_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -425,6 +436,17 @@ def build(md_path: str, retries=0):
 
         # Invalidate global FAISS cache to force reload of new index
         reset_faiss_index()
+
+        duration_ms = (time.time() - ingest_start) * 1000
+        metrics.observe_histogram(MetricNames.INGESTION_LATENCY, duration_ms)
+        metrics.set_gauge(MetricNames.INDEX_SIZE, len(chunks))
+        logger.info(json.dumps({
+            "event": "rag.ingest.complete",
+            "md_path": md_path,
+            "chunks": len(chunks),
+            "duration_ms": round(duration_ms, 2),
+            "cache_hit_rate": round(hit_rate, 2) if chunks else 0.0,
+        }))
 
         logger.info("\n[4/4] Done.")
         logger.info("=" * 70)
@@ -459,7 +481,7 @@ def load_index():
             f"   Stored model: {stored_model}"
         )
         logger.error(
-            f"   Current model: {config.EMB_MODEL if config.EMB_BACKEND == 'ollama' else 'all-MiniLM-L6-v2'}"
+            f"   Current model: {config.RAG_EMBED_MODEL if config.EMB_BACKEND == 'ollama' else 'all-MiniLM-L6-v2'}"
         )
         logger.error(
             f"   Expected dimension: {config.EMB_DIM}"

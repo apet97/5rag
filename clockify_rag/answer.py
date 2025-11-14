@@ -14,7 +14,7 @@ import hashlib
 import json
 import logging
 import time
-from typing import Dict, List, Tuple, Optional, Any, Mapping, Sequence
+from typing import Dict, List, Tuple, Optional, Any
 
 import numpy as np
 
@@ -43,40 +43,6 @@ from .metrics import get_metrics, MetricNames
 from .utils import sanitize_for_log
 
 logger = logging.getLogger(__name__)
-
-
-def _extract_chunk_identifier(chunk: Mapping[str, Any], fallback: Any) -> Any:
-    """Return a stable chunk identifier for telemetry and caching."""
-
-    for key in ("id", "chunk_id"):
-        if key in chunk and chunk[key] is not None:
-            return chunk[key]
-    return fallback
-
-
-def _resolve_chunk_ids(chunks: Sequence[Mapping[str, Any]], indices: Sequence[Any]) -> List[Any]:
-    """Map positional indices to chunk identifiers."""
-
-    resolved: List[Any] = []
-    total = len(chunks)
-
-    for idx in indices:
-        if isinstance(idx, Mapping):
-            resolved.append(_extract_chunk_identifier(idx, idx))
-            continue
-
-        try:
-            pos = int(idx)
-        except (TypeError, ValueError):
-            resolved.append(idx)
-            continue
-
-        if 0 <= pos < total:
-            resolved.append(_extract_chunk_identifier(chunks[pos], pos))
-        else:
-            resolved.append(pos)
-
-    return resolved
 
 
 def apply_mmr_diversification(
@@ -388,7 +354,6 @@ def answer_once(
         faiss_index_path=faiss_index_path
     )
     retrieve_time = time.time() - t0
-    selected_chunk_ids = _resolve_chunk_ids(chunks, selected)
 
     # Check coverage
     if not coverage_ok(selected, scores["dense"], threshold):
@@ -404,9 +369,7 @@ def answer_once(
             "refused": True,
             "confidence": None,
             "selected_chunks": [],
-            "selected_chunk_ids": [],
             "packed_chunks": [],
-            "packed_chunk_ids": [],
             "context_block": "",
             "timing": {
                 "total_ms": (time.time() - t_start) * 1000,
@@ -437,7 +400,6 @@ def answer_once(
     context_block, packed_ids, used_tokens = pack_snippets(
         chunks, mmr_selected, pack_top=pack_top, num_ctx=num_ctx
     )
-    packed_chunk_ids = list(packed_ids or [])
 
     def _llm_failure(reason: str, error: Exception) -> Dict[str, Any]:
         total_time = time.time() - t_start
@@ -453,9 +415,7 @@ def answer_once(
             "refused": True,
             "confidence": None,
             "selected_chunks": selected,
-            "selected_chunk_ids": selected_chunk_ids,
             "packed_chunks": mmr_selected,
-            "packed_chunk_ids": packed_chunk_ids,
             "context_block": context_block,
             "timing": {
                 "total_ms": total_time * 1000,
@@ -518,9 +478,7 @@ def answer_once(
         "refused": refused,
         "confidence": confidence,
         "selected_chunks": selected,
-        "selected_chunk_ids": selected_chunk_ids,
         "packed_chunks": mmr_selected,
-        "packed_chunk_ids": packed_chunk_ids,
         "context_block": context_block,
         "timing": {
             "total_ms": total_time * 1000,

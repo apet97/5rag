@@ -326,7 +326,7 @@ python3 clockify_support_cli_final.py chat
 **Solution 3: VPN Requires HTTP Proxy**
 ```bash
 # Enable proxy support (disabled by default for security)
-export ALLOW_PROXIES=1  # legacy USE_PROXY=1 also works
+export ALLOW_PROXIES=1
 export http_proxy="http://proxy.company.com:8080"
 export OLLAMA_URL="http://127.0.0.1:11434"
 python3 clockify_support_cli_final.py chat
@@ -344,7 +344,7 @@ export OLLAMA_URL="http://127.0.0.1:11435"
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `OLLAMA_URL` | `http://127.0.0.1:11434` | Ollama endpoint URL |
-| `ALLOW_PROXIES` | `0` (disabled) | Enable HTTP proxy support (`USE_PROXY` alias supported) |
+| `ALLOW_PROXIES` | `0` (disabled) | Enable HTTP proxy support |
 | `http_proxy` | (none) | HTTP proxy server |
 | `https_proxy` | (none) | HTTPS proxy server |
 

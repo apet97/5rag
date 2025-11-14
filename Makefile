@@ -1,12 +1,15 @@
-.PHONY: help venv install selftest build chat smoke smoke-full clean dev test eval benchmark benchmark-quick typecheck lint format pre-commit-install pre-commit-run regen-artifacts rebuild-all
+.PHONY: help venv install deps-check selftest build chat smoke smoke-full clean dev test eval benchmark benchmark-quick typecheck lint format pre-commit-install pre-commit-run regen-artifacts rebuild-all
 
 help:
 	@echo "v4.1 Clockify RAG CLI - Make Targets"
 	@echo ""
 	@echo "  make dev                 - Setup development environment (venv + install + pre-commit)"
 	@echo "  make venv                - Create Python virtual environment"
-	@echo "  make install             - Install dependencies (requires venv)"
+	@echo "  make install             - Install dependencies via pyproject (requires venv)"
+	@echo "  make deps-check          - Run pip check + targeted pytest smoke"
 	@echo "  make build               - Build knowledge base (uses local embeddings for speed)"
+	@echo "  make ingest              - Alias for 'make build' (ragctl ingest)"
+	@echo "  make reindex             - Force rebuild of KB/index artifacts"
 	@echo "  make regen-artifacts     - Regenerate derived artifacts (chunk_title_map.json, etc.)"
 	@echo "  make rebuild-all         - Clean and rebuild all artifacts from scratch"
 	@echo "  make selftest            - Run self-test suite"
@@ -38,10 +41,21 @@ install:
 		echo "Installing from lockfile..."; \
 		source rag_env/bin/activate && pip install -q -r requirements.lock; \
 	else \
-		echo "Installing from requirements.txt..."; \
-		source rag_env/bin/activate && pip install -q -r requirements.txt; \
+		echo "Installing editable package with dev extras..."; \
+		source rag_env/bin/activate && pip install -q -e '.[dev]'; \
 	fi
 	@echo "✅ Dependencies installed"
+
+.PHONY: deps-check
+deps-check:
+	@echo "Running dependency health checks..."
+	@if [ ! -d rag_env ]; then \
+		echo "❌ rag_env not found. Run 'make dev' first."; \
+		exit 1; \
+	fi
+	source rag_env/bin/activate && python -m pip check
+	source rag_env/bin/activate && python -m pytest tests/test_api_client.py tests/test_config_module.py
+	@echo "✅ Dependency check suite passed"
 
 .PHONY: freeze
 freeze:
@@ -50,10 +64,18 @@ freeze:
 	@echo "✅ Lockfile generated"
 
 build:
-	@echo "Building knowledge base with local embeddings (faster than Ollama)..."
-	source rag_env/bin/activate && EMB_BACKEND=local python3 clockify_support_cli_final.py build knowledge_full.md
+	@echo "Building knowledge base with ragctl ingest (local embeddings for speed)..."
+	source rag_env/bin/activate && EMB_BACKEND=local python3 -m clockify_rag.cli_modern ingest --input knowledge_full.md
 	@echo ""
 	@echo "Hint: To use Ollama embeddings instead, run: EMB_BACKEND=ollama make build"
+
+ingest: build
+	@true
+
+reindex:
+	@echo "Force rebuilding knowledge base and indexes..."
+	source rag_env/bin/activate && EMB_BACKEND=local python3 -m clockify_rag.cli_modern ingest --input knowledge_full.md --force
+	@echo "✅ Reindex complete"
 
 regen-artifacts:
 	@echo "Regenerating derived artifacts..."
@@ -114,8 +136,8 @@ test:
 	python3 -m pytest tests/ -v --cov=clockify_support_cli_final --cov-report=term-missing --cov-report=html
 
 eval:
-        @echo "Running RAG evaluation on ground truth dataset..."
-        python3 eval.py --dataset eval_datasets/clockify_v1.jsonl
+	@echo "Running RAG evaluation on ground truth dataset..."
+	python3 eval.py --dataset eval_datasets/clockify_v1.jsonl
 
 benchmark:
 	@echo "Running performance benchmarks..."

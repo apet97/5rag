@@ -11,12 +11,14 @@ class LLMError(Exception):
     pass
 
 
+class LLMUnavailableError(LLMError):
+    """LLM endpoint is unreachable or timed out."""
+    pass
+
+
 class IndexLoadError(Exception):
     """Index loading or validation failed."""
-
-    def __init__(self, message: str, exit_code: int = 1):
-        super().__init__(message)
-        self.exit_code = exit_code
+    pass
 
 
 class BuildError(Exception):

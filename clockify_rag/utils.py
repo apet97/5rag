@@ -14,37 +14,11 @@ from contextlib import contextmanager
 from typing import Any, Dict, Optional
 
 import numpy as np
-import requests
 
 # Note: config will be imported at module level to avoid circular imports
 # For functions that need dynamic config access, we'll import inside functions
 
 logger = logging.getLogger(__name__)
-
-_PROXY_TRUST_ENV_VARS = ("ALLOW_PROXIES", "USE_PROXY")
-
-
-def proxies_allowed() -> bool:
-    """Return True if proxy trust should be enabled based on env vars.
-
-    Supports both the modern ``ALLOW_PROXIES`` flag and the legacy
-    ``USE_PROXY`` name. Values like ``1``, ``true``, ``yes``, and ``on`` are
-    treated as truthy. Any other explicit value disables proxy trust. If no
-    environment variables are set, proxy trust remains disabled by default.
-    """
-
-    for key in _PROXY_TRUST_ENV_VARS:
-        raw_value = os.getenv(key)
-        if raw_value is None:
-            continue
-
-        normalized = raw_value.strip().lower()
-        if normalized in {"1", "true", "yes", "on"}:
-            return True
-        if normalized in {"0", "false", "no", "off"}:
-            return False
-
-    return False
 
 
 # ====== INPUT SANITIZATION ======
@@ -227,10 +201,8 @@ def validate_ollama_url(url: str) -> str:
     from urllib.parse import urlparse
     try:
         parsed = urlparse(url)
-        if not parsed.scheme or (
-            parsed.scheme not in ("http", "https") and not parsed.netloc and parsed.path
-        ):
-            # Assume http if missing or malformed scheme (e.g., "localhost:11434")
+        if not parsed.scheme:
+            # Assume http if no scheme
             url = "http://" + url
             parsed = urlparse(url)
         if parsed.scheme not in ("http", "https"):
@@ -246,48 +218,36 @@ def validate_ollama_url(url: str) -> str:
         raise ValueError(f"Invalid Ollama URL '{url}': {e}")
 
 
-def check_ollama_connectivity(url: str, timeout: float) -> str:
-    """Probe the Ollama endpoint using a lightweight HTTP request.
-
-    Args:
-        url: Ollama endpoint URL. May be missing a scheme.
-        timeout: Timeout (in seconds) for the HTTP request.
-
-    Returns:
-        The normalized Ollama URL that was successfully contacted.
-
-    Raises:
-        ValueError: If the URL is invalid.
-        RuntimeError: If the Ollama endpoint cannot be reached.
-    """
-
-    normalized_url = validate_ollama_url(url)
-    probe_url = f"{normalized_url}/api/tags"
-
-    try:
-        response = requests.get(probe_url, timeout=timeout)
-        response.raise_for_status()
-    except requests.exceptions.RequestException as exc:
-        raise RuntimeError(f"Failed to connect to Ollama at {normalized_url}: {exc}") from exc
-
-    return normalized_url
-
-
-def validate_and_set_config(ollama_url=None, gen_model=None, emb_model=None, ctx_budget=None):
+def validate_and_set_config(ollama_url=None, gen_model=None, emb_model=None, ctx_budget=None, emb_backend=None, ann_backend=None, alpha_hybrid=None, top_k=None, pack_top=None, threshold=None, seed=None, num_ctx=None, num_predict=None, retries=None, faiss_multiplier=None):
     """Validate and set global config from CLI args."""
     import clockify_rag.config as config
 
     if ollama_url:
-        config.OLLAMA_URL = validate_ollama_url(ollama_url)
-        logger.info(f"Ollama endpoint: {config.OLLAMA_URL}")
+        config.RAG_OLLAMA_URL = validate_ollama_url(ollama_url)
+        config.OLLAMA_URL = config.RAG_OLLAMA_URL  # legacy alias
+        logger.info(f"Ollama endpoint: {config.RAG_OLLAMA_URL}")
 
     if gen_model:
-        config.GEN_MODEL = gen_model
-        logger.info(f"Generation model: {config.GEN_MODEL}")
+        config.RAG_CHAT_MODEL = gen_model
+        config.GEN_MODEL = config.RAG_CHAT_MODEL  # legacy alias
+        logger.info(f"Generation model: {config.RAG_CHAT_MODEL}")
 
     if emb_model:
-        config.EMB_MODEL = emb_model
-        logger.info(f"Embedding model: {config.EMB_MODEL}")
+        config.RAG_EMBED_MODEL = emb_model
+        config.EMB_MODEL = config.RAG_EMBED_MODEL  # legacy alias
+        logger.info(f"Embedding model: {config.RAG_EMBED_MODEL}")
+
+    if emb_backend:
+        config.EMB_BACKEND = emb_backend
+        logger.info(f"Embedding backend: {config.EMB_BACKEND}")
+
+    if ann_backend:
+        config.USE_ANN = ann_backend
+        logger.info(f"ANN backend: {config.USE_ANN}")
+
+    if alpha_hybrid is not None:
+        config.ALPHA_HYBRID = alpha_hybrid
+        logger.info(f"Alpha hybrid: {config.ALPHA_HYBRID}")
 
     if ctx_budget:
         try:
@@ -297,6 +257,38 @@ def validate_and_set_config(ollama_url=None, gen_model=None, emb_model=None, ctx
             logger.info(f"Context token budget: {config.CTX_TOKEN_BUDGET}")
         except ValueError as e:
             raise ValueError(f"Invalid context budget: {e}")
+
+    if top_k:
+        config.DEFAULT_TOP_K = top_k
+        logger.info(f"Default top k: {config.DEFAULT_TOP_K}")
+
+    if pack_top:
+        config.DEFAULT_PACK_TOP = pack_top
+        logger.info(f"Default pack top: {config.DEFAULT_PACK_TOP}")
+
+    if threshold is not None:
+        config.DEFAULT_THRESHOLD = threshold
+        logger.info(f"Default threshold: {config.DEFAULT_THRESHOLD}")
+
+    if seed is not None:
+        config.DEFAULT_SEED = seed
+        logger.info(f"Default seed: {config.DEFAULT_SEED}")
+
+    if num_ctx:
+        config.DEFAULT_NUM_CTX = num_ctx
+        logger.info(f"Default num ctx: {config.DEFAULT_NUM_CTX}")
+
+    if num_predict:
+        config.DEFAULT_NUM_PREDICT = num_predict
+        logger.info(f"Default num predict: {config.DEFAULT_NUM_PREDICT}")
+
+    if retries is not None:
+        config.DEFAULT_RETRIES = retries
+        logger.info(f"Default retries: {config.DEFAULT_RETRIES}")
+
+    if faiss_multiplier:
+        config.FAISS_CANDIDATE_MULTIPLIER = faiss_multiplier
+        logger.info(f"FAISS candidate multiplier: {config.FAISS_CANDIDATE_MULTIPLIER}")
 
 
 def validate_chunk_config():
@@ -361,7 +353,8 @@ def _log_config_summary(use_rerank=False, pack_top=None, seed=None, threshold=No
     else:
         logger.info(f"PLATFORM platform={sys_platform} arch={sys_arch}")
 
-    proxy_trust = 1 if proxies_allowed() else 0
+    from .config import ALLOW_PROXIES
+    proxy_trust = 1 if ALLOW_PROXIES else 0
     # Single-line CONFIG banner
     logger.info(
         f"CONFIG model={GEN_MODEL} emb={EMB_MODEL} topk={top_k} pack={pack_top} thr={threshold} "
@@ -573,9 +566,10 @@ def _ensure_nltk(auto_download=None):
         pass
 
     # Determine if we should download
+    import clockify_rag.config as config
     if auto_download is None:
-        # Check environment variable (default: allow download unless explicitly disabled)
-        auto_download = os.environ.get("NLTK_AUTO_DOWNLOAD", "1").lower() not in {"0", "false", "no", "off"}
+        # Use centralized config (default: allow download unless explicitly disabled)
+        auto_download = config.NLTK_AUTO_DOWNLOAD
 
     if auto_download and not _NLTK_DOWNLOAD_ATTEMPTED:
         _NLTK_DOWNLOAD_ATTEMPTED = True

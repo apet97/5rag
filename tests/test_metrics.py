@@ -340,6 +340,8 @@ class TestMetricNames:
         assert hasattr(MetricNames, "QUERY_LATENCY")
         assert hasattr(MetricNames, "RETRIEVAL_LATENCY")
         assert hasattr(MetricNames, "LLM_LATENCY")
+        assert hasattr(MetricNames, "INGESTIONS_TOTAL")
+        assert hasattr(MetricNames, "INGESTION_LATENCY")
         assert hasattr(MetricNames, "CACHE_SIZE")
         assert hasattr(MetricNames, "INDEX_SIZE")
 
@@ -349,14 +351,20 @@ class TestMetricNames:
 
         collector.increment_counter(MetricNames.QUERIES_TOTAL)
         collector.increment_counter(MetricNames.CACHE_HITS)
+        collector.increment_counter(MetricNames.INGESTIONS_TOTAL)
         collector.observe_histogram(MetricNames.QUERY_LATENCY, 150.0)
+        collector.observe_histogram(MetricNames.INGESTION_LATENCY, 500.0)
 
         assert collector.get_counter(MetricNames.QUERIES_TOTAL) == 1.0
         assert collector.get_counter(MetricNames.CACHE_HITS) == 1.0
+        assert collector.get_counter(MetricNames.INGESTIONS_TOTAL) == 1.0
 
         stats = collector.get_histogram_stats(MetricNames.QUERY_LATENCY)
         assert stats is not None
         assert stats.mean == 150.0
+        ingest_stats = collector.get_histogram_stats(MetricNames.INGESTION_LATENCY)
+        assert ingest_stats is not None
+        assert ingest_stats.mean == 500.0
 
 
 class TestHistogramMaxHistory:

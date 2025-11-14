@@ -1,13 +1,36 @@
 """Configuration constants for Clockify RAG system."""
 
-import json
 import logging
 import os
-from pathlib import Path
-from typing import FrozenSet, Iterable
+from typing import Iterable, Optional
 
 # FIX (Error #13): Helper functions for safe environment variable parsing
 _logger = logging.getLogger(__name__)
+
+
+def _get_env_value(
+    primary: str,
+    default: Optional[str] = None,
+    legacy_keys: Optional[Iterable[str]] = None,
+) -> Optional[str]:
+    """Read environment variables with optional legacy fallbacks.
+
+    Args:
+        primary: Preferred environment variable name (new `RAG_*` namespace)
+        default: Default value if nothing is set
+        legacy_keys: Older env var names to support for backwards compatibility
+
+    Returns:
+        The first non-empty environment value, or the provided default.
+    """
+    keys = [primary]
+    if legacy_keys:
+        keys.extend(legacy_keys)
+    for key in keys:
+        value = os.environ.get(key)
+        if value is not None and value.strip() != "":
+            return value.strip()
+    return default
 
 
 def _parse_env_float(key: str, default: float, min_val: float = None, max_val: float = None) -> float:
@@ -84,118 +107,33 @@ def _parse_env_int(key: str, default: int, min_val: int = None, max_val: int = N
     return parsed
 
 
-def _get_bool_env(var_name: str, default: str = "1") -> bool:
-    """Read a boolean environment variable."""
-
-    value = os.environ.get(var_name, default)
-    return value.lower() not in {"0", "false", "no", "off", ""}
-
-
-# ====== API CONFIG ======
-
-
-def _parse_allowed_origins() -> list[str]:
-    """Parse comma separated CORS origins from the environment."""
-
-    raw_value = os.environ.get("RAG_API_ALLOWED_ORIGINS")
-    if not raw_value:
-        # Default to localhost addresses used during development.
-        return ["http://127.0.0.1:8000", "http://localhost:8000"]
-
-    parsed = [origin.strip() for origin in raw_value.split(",") if origin.strip()]
-    return parsed or ["http://127.0.0.1:8000", "http://localhost:8000"]
-
-
-RAG_API_ALLOWED_ORIGINS = _parse_allowed_origins()
-
-
-# ====== AUTH CONFIG ======
-
-
-def _read_secret_file(path: str) -> str | None:
-    """Read a secret value from a file.
-
-    Allows mounting secrets via Docker/Kubernetes secret volumes while keeping
-    environment variables minimal.
-    """
-
-    if not path:
-        return None
-
-    try:
-        secret_path = Path(path)
-        if not secret_path.exists():
-            _logger.warning("Secret file %s does not exist", secret_path)
-            return None
-
-        return secret_path.read_text(encoding="utf-8").strip()
-    except OSError as exc:  # pragma: no cover - rare filesystem failures
-        _logger.error("Unable to read secret file %s: %s", path, exc)
-        return None
-
-
-def _parse_secret_collection(raw_values: Iterable[str]) -> FrozenSet[str]:
-    """Normalize an iterable of secret values into a frozenset."""
-
-    normalized = {value.strip() for value in raw_values if value and value.strip()}
-    return frozenset(normalized)
-
-
-def _load_api_keys() -> FrozenSet[str]:
-    """Load API keys from env variables or mounted secret files.
-
-    Supported sources:
-    - ``RAG_API_KEYS``: comma separated list (``key1,key2``)
-    - ``RAG_API_KEYS_FILE``: file path containing either newline separated keys
-      or a JSON array (``["key1", "key2"]``)
-    """
-
-    keys: list[str] = []
-
-    env_keys = os.environ.get("RAG_API_KEYS")
-    if env_keys:
-        keys.extend(part.strip() for part in env_keys.split(","))
-
-    secrets_file = os.environ.get("RAG_API_KEYS_FILE")
-    if secrets_file:
-        raw_secret = _read_secret_file(secrets_file)
-        if raw_secret:
-            try:
-                maybe_json = json.loads(raw_secret)
-            except json.JSONDecodeError:
-                keys.extend(line.strip() for line in raw_secret.splitlines())
-            else:
-                if isinstance(maybe_json, list):
-                    keys.extend(str(item) for item in maybe_json)
-                else:
-                    _logger.error(
-                        "Expected list in %s for API keys secret, got %s", secrets_file, type(maybe_json)
-                    )
-
-    return _parse_secret_collection(keys)
-
-
-API_AUTH_MODE = os.environ.get("RAG_AUTH_MODE", "none").strip().lower()
-API_KEY_HEADER = os.environ.get("RAG_API_KEY_HEADER", "x-api-key")
-API_ALLOWED_KEYS = _load_api_keys()
-API_JWT_SECRET = os.environ.get("RAG_JWT_SECRET") or _read_secret_file(
-    os.environ.get("RAG_JWT_SECRET_FILE", "")
-)
-API_JWT_ALGORITHMS = [
-    algo.strip()
-    for algo in os.environ.get("RAG_JWT_ALGORITHMS", "HS256").split(",")
-    if algo.strip()
-]
-API_PRIVACY_MODE = _get_bool_env("RAG_API_PRIVACY_MODE", "0")
-
 # ====== OLLAMA CONFIG ======
-OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
-GEN_MODEL = os.environ.get("GEN_MODEL", "qwen2.5:32b")
-EMB_MODEL = os.environ.get("EMB_MODEL", "nomic-embed-text")
+_DEFAULT_RAG_OLLAMA_URL = "http://10.127.0.192:11434"
+
+RAG_OLLAMA_URL = _get_env_value(
+    "RAG_OLLAMA_URL",
+    default=_DEFAULT_RAG_OLLAMA_URL,
+    legacy_keys=("OLLAMA_URL",),
+)
+RAG_CHAT_MODEL = _get_env_value(
+    "RAG_CHAT_MODEL",
+    default="qwen2.5:32b",
+    legacy_keys=("GEN_MODEL", "CHAT_MODEL"),
+)
+RAG_EMBED_MODEL = _get_env_value(
+    "RAG_EMBED_MODEL",
+    default="nomic-embed-text:latest",
+    legacy_keys=("EMB_MODEL", "EMBED_MODEL"),
+)
+
+# Backwards-compatible aliases (legacy code/tests expect these names)
+OLLAMA_URL = RAG_OLLAMA_URL
+GEN_MODEL = RAG_CHAT_MODEL
+EMB_MODEL = RAG_EMBED_MODEL
 
 # ====== CHUNKING CONFIG ======
-CHUNK_CHARS = 1600
-CHUNK_OVERLAP = 200
+CHUNK_CHARS = _parse_env_int("CHUNK_CHARS", 1600, min_val=100, max_val=8000)
+CHUNK_OVERLAP = _parse_env_int("CHUNK_OVERLAP", 200, min_val=0, max_val=4000)
 
 # ====== RETRIEVAL CONFIG ======
 # OPTIMIZATION: Increase retrieval parameters for better recall on internal deployment
@@ -223,7 +161,8 @@ BM25_B = _parse_env_float("BM25_B", 0.65, min_val=0.0, max_val=1.0)
 # Fully utilizes Qwen 32B's 32K context window capacity
 # FIX (Error #13): Use safe env var parsing
 DEFAULT_NUM_CTX = _parse_env_int("DEFAULT_NUM_CTX", 32768, min_val=512, max_val=128000)  # Was 16384, now 32768
-DEFAULT_NUM_PREDICT = 512
+# Allow overriding generation length via env for ops tuning
+DEFAULT_NUM_PREDICT = _parse_env_int("DEFAULT_NUM_PREDICT", 512, min_val=32, max_val=4096)
 # FIX: Increase default retries from 0 to 2 for remote Ollama resilience
 # Remote endpoints (especially over VPN) benefit from transient error retry
 # Can be overridden via DEFAULT_RETRIES env var or --retries CLI flag
@@ -301,24 +240,60 @@ REFUSAL_STR = "I don't know based on the MD."
 
 # ====== LOGGING CONFIG ======
 
+
+def _get_bool_env(var_name: str, default: str = "1") -> bool:
+    """Read a boolean environment variable."""
+
+    value = os.environ.get(var_name, default)
+    return value.lower() not in {"0", "false", "no", "off", ""}
+
+
 # Query logging configuration
 QUERY_LOG_FILE = os.environ.get("RAG_LOG_FILE", "rag_queries.jsonl")
-QUERY_LOG_MAX_BYTES = _parse_env_int(
-    "RAG_LOG_FILE_MAX_BYTES",
-    5_000_000,
-    min_val=0,
-)
-QUERY_LOG_BACKUP_COUNT = _parse_env_int(
-    "RAG_LOG_FILE_BACKUP_COUNT",
-    5,
-    min_val=0,
-)
 LOG_QUERY_INCLUDE_ANSWER = _get_bool_env("RAG_LOG_INCLUDE_ANSWER", "1")
 LOG_QUERY_ANSWER_PLACEHOLDER = os.environ.get("RAG_LOG_ANSWER_PLACEHOLDER", "[REDACTED]")
 LOG_QUERY_INCLUDE_CHUNKS = _get_bool_env("RAG_LOG_INCLUDE_CHUNKS", "0")  # Redact chunk text by default for security/privacy
 
 # Citation validation configuration
 STRICT_CITATIONS = _get_bool_env("RAG_STRICT_CITATIONS", "0")  # Refuse answers without citations (improves trust in regulated environments)
+
+# ====== CACHING & RATE LIMITING CONFIG ======
+# Query cache size
+CACHE_MAXSIZE = _parse_env_int("CACHE_MAXSIZE", 100, min_val=1, max_val=10000)
+# Cache TTL in seconds
+CACHE_TTL = _parse_env_int("CACHE_TTL", 3600, min_val=60, max_val=86400)
+# Rate limiting: max requests per window
+RATE_LIMIT_REQUESTS = _parse_env_int("RATE_LIMIT_REQUESTS", 10, min_val=1, max_val=1000)
+# Rate limiting window in seconds
+RATE_LIMIT_WINDOW = _parse_env_int("RATE_LIMIT_WINDOW", 60, min_val=1, max_val=3600)
+
+# ====== WARMUP CONFIG ======
+# Warm-up on startup
+WARMUP_ENABLED = _get_bool_env("WARMUP", "1")
+
+# ====== NLTK DOWNLOAD CONFIG ======
+# Auto-download NLTK data
+NLTK_AUTO_DOWNLOAD = _get_bool_env("NLTK_AUTO_DOWNLOAD", "1")
+
+# ====== QUERY EXPANSION CONFIG ======
+# Query expansion file path
+CLOCKIFY_QUERY_EXPANSIONS = os.environ.get("CLOCKIFY_QUERY_EXPANSIONS", None)
+
+# Maximum query expansion file size (in bytes)
+MAX_QUERY_EXPANSION_FILE_SIZE = _parse_env_int("MAX_QUERY_EXPANSION_FILE_SIZE", 10485760, min_val=1024, max_val=104857600)  # 10MB default, 100MB max
+
+# ====== PROXY CONFIGURATION ======
+# Optional HTTP proxy support (disabled by default for security)
+ALLOW_PROXIES = _get_bool_env("ALLOW_PROXIES", "0")  # Enable proxy usage when set to 1/true/yes
+HTTP_PROXY = os.environ.get("HTTP_PROXY", "")  # HTTP proxy URL
+HTTPS_PROXY = os.environ.get("HTTPS_PROXY", "")  # HTTPS proxy URL
+
+# Set proxy environment variables if allowed and configured
+if ALLOW_PROXIES:
+    if HTTP_PROXY:
+        os.environ["HTTP_PROXY"] = HTTP_PROXY
+    if HTTPS_PROXY:
+        os.environ["HTTPS_PROXY"] = HTTPS_PROXY
 
 # ====== FILE PATHS ======
 FILES = {
@@ -340,8 +315,9 @@ BUILD_LOCK_TTL_SEC = _parse_env_int("BUILD_LOCK_TTL_SEC", 900, min_val=60, max_v
 
 # ====== RETRIEVAL CONFIG (CONTINUED) ======
 # FAISS/HNSW candidate generation (Quick Win #6)
-FAISS_CANDIDATE_MULTIPLIER = 3  # Retrieve top_k * 3 candidates for reranking
-ANN_CANDIDATE_MIN = 200  # Minimum candidates even if top_k is small
+# Expose FAISS candidate knobs through env for prod-level tuning
+FAISS_CANDIDATE_MULTIPLIER = _parse_env_int("FAISS_CANDIDATE_MULTIPLIER", 3, min_val=1, max_val=10)  # Retrieve top_k * N
+ANN_CANDIDATE_MIN = _parse_env_int("ANN_CANDIDATE_MIN", 200, min_val=1, max_val=2000)  # Minimum candidates even if top_k is small
 
 # Reranking (Quick Win #6)
 RERANK_SNIPPET_MAX_CHARS = 500  # Truncate chunk text for reranking prompt

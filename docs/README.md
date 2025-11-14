@@ -127,20 +127,6 @@ python3 -m uvicorn clockify_rag.api:app --host 0.0.0.0 --port 8000
 gunicorn -w 4 --bind 0.0.0.0:8000 clockify_rag.api:app
 ```
 
-### Rate Limiting / Throttling
-
-Every inbound question flows through a sliding-window rate limiter. Operations teams can tune it with two
-environment variables:
-
-| Variable | Description |
-| --- | --- |
-| `RATE_LIMIT_REQUESTS` | Number of requests allowed per identity within the window (default: `10`). |
-| `RATE_LIMIT_WINDOW` | Length of the sliding window in seconds (default: `60`). |
-
-Identities are derived from the CLI process (per PID) or from API credentials / client IPs. When the limit is
-exceeded, CLI users see a friendly "try again later" prompt while API callers receive HTTP 429 responses with a
-`Retry-After` hint. Setting either variable to `0` disables throttling if you have dedicated infrastructure.
-
 ## 📊 System Architecture
 
 ```
@@ -166,9 +152,9 @@ Knowledge Base (markdown)
 See [docs/CONFIG.md](CONFIG.md) for detailed parameter documentation.
 
 Key environment variables:
-- `OLLAMA_URL`: Ollama service URL (default: http://127.0.0.1:11434)
-- `GEN_MODEL`: Generation model (default: qwen2.5:32b)
-- `EMB_MODEL`: Embedding model (default: nomic-embed-text)
+- `RAG_OLLAMA_URL`: Ollama service URL (default: http://10.127.0.192:11434; override to http://127.0.0.1:11434 locally)
+- `RAG_CHAT_MODEL`: Generation model (default: qwen2.5:32b)
+- `RAG_EMBED_MODEL`: Embedding model (default: nomic-embed-text:latest)
 - `DEFAULT_TOP_K`: Retrieval candidates (default: 15)
 - `DEFAULT_PACK_TOP`: Final context chunks (default: 8)
 - `DEFAULT_THRESHOLD`: Minimum similarity (default: 0.25)
@@ -190,7 +176,7 @@ Key environment variables:
 ```bash
 docker build -t clockify-rag:latest .
 docker run -p 8000:8000 \
-  -e OLLAMA_URL=http://host.docker.internal:11434 \
+  -e RAG_OLLAMA_URL=http://host.docker.internal:11434 \
   clockify-rag:latest
 ```
 

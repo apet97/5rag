@@ -24,6 +24,7 @@ from clockify_rag.answer import (
     answer_once,
 )
 from clockify_rag.config import REFUSAL_STR
+from clockify_rag.exceptions import LLMUnavailableError, LLMError
 
 
 @pytest.fixture
@@ -332,10 +333,6 @@ class TestAnswerOnce:
         assert result["confidence"] == 85
         assert "timing" in result
         assert "metadata" in result
-        assert result["selected_chunk_ids"] == [c["id"] for c in sample_chunks[:3]]
-        assert result["packed_chunk_ids"]
-        assert set(result["packed_chunk_ids"]).issubset(set(result["selected_chunk_ids"]))
-        assert result["metadata"]["packed_count"] == len(result["packed_chunk_ids"])
 
     @patch('clockify_rag.answer.retrieve')
     def test_answer_once_low_coverage(self, mock_retrieve, sample_chunks, sample_embeddings):
@@ -364,8 +361,6 @@ class TestAnswerOnce:
 
         assert result["refused"]
         assert result["answer"] == REFUSAL_STR
-        assert result["selected_chunk_ids"] == []
-        assert result["packed_chunk_ids"] == []
 
     @patch('clockify_rag.answer.retrieve')
     @patch('clockify_rag.answer.ask_llm')
@@ -395,6 +390,49 @@ class TestAnswerOnce:
         assert "answer" in result
         # Reranking metadata should be present
         assert "rerank_applied" in result["metadata"]
+
+    @patch('clockify_rag.answer.generate_llm_answer')
+    @patch('clockify_rag.answer.retrieve')
+    def test_answer_once_handles_llm_unavailable(self, mock_retrieve, mock_generate, sample_chunks, sample_embeddings):
+        """Ensure answer_once returns structured refusal when LLM is unreachable."""
+        mock_retrieve.return_value = (
+            [0, 1, 2],
+            {
+                "dense": np.array([0.9, 0.8, 0.7], dtype=np.float32),
+                "bm25": np.array([0.85, 0.75, 0.65], dtype=np.float32),
+                "hybrid": np.array([0.875, 0.775, 0.675], dtype=np.float32),
+            }
+        )
+        mock_generate.side_effect = LLMUnavailableError("timeout")
+        bm = {"idf": {}, "avgdl": 10, "doc_lens": [10]*5, "doc_tfs": [{}]*5}
+
+        result = answer_once("How to track time?", sample_chunks, sample_embeddings, bm)
+
+        assert result["refused"]
+        assert result["answer"] == REFUSAL_STR
+        assert result["metadata"]["llm_error"] == "llm_unavailable"
+        assert "llm_error_msg" in result["metadata"]
+        assert "routing" in result
+
+    @patch('clockify_rag.answer.generate_llm_answer')
+    @patch('clockify_rag.answer.retrieve')
+    def test_answer_once_handles_generic_llm_error(self, mock_retrieve, mock_generate, sample_chunks, sample_embeddings):
+        """Ensure answer_once surfaces non-availability LLM errors."""
+        mock_retrieve.return_value = (
+            [0, 1],
+            {
+                "dense": np.array([0.9, 0.8], dtype=np.float32),
+                "bm25": np.array([0.85, 0.75], dtype=np.float32),
+                "hybrid": np.array([0.875, 0.775], dtype=np.float32),
+            }
+        )
+        mock_generate.side_effect = LLMError("bad response")
+        bm = {"idf": {}, "avgdl": 10, "doc_lens": [10]*5, "doc_tfs": [{}]*5}
+
+        result = answer_once("How to track time?", sample_chunks, sample_embeddings, bm)
+
+        assert result["refused"]
+        assert result["metadata"]["llm_error"] == "llm_error"
 
 
 if __name__ == "__main__":

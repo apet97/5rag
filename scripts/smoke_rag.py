@@ -17,7 +17,7 @@ from clockify_rag.answer import answer_once
 from clockify_rag import config
 
 
-def run_smoke_test(question: str, top_k: int, pack_top: int, threshold: float, retries: int) -> int:
+def run_smoke_test(question: str, top_k: int, pack_top: int, threshold: float, retries: int, client_mode: str) -> int:
     """Execute the smoke test and return an exit code."""
     index = load_index()
     if index is None:
@@ -50,8 +50,6 @@ def run_smoke_test(question: str, top_k: int, pack_top: int, threshold: float, r
     metadata = result.get("metadata", {})
 
     endpoint = config.RAG_OLLAMA_URL
-    client_mode = os.environ.get("RAG_LLM_CLIENT", "ollama")
-
     print("============== SMOKE TEST ==============")
     print(f"Question:      {question}")
     print(f"Ollama URL:    {endpoint}")
@@ -87,6 +85,21 @@ def run_smoke_test(question: str, top_k: int, pack_top: int, threshold: float, r
     return 0
 
 
+def _configure_llm_client(preferred_client: Optional[str]) -> str:
+    """Set RAG_LLM_CLIENT to the desired mode (default mock) and return it."""
+    env_mode = os.environ.get("RAG_LLM_CLIENT")
+    if preferred_client:
+        mode = preferred_client
+    elif env_mode:
+        mode = env_mode
+    else:
+        mode = "mock"
+        print("[info] RAG_LLM_CLIENT not set; defaulting to mock client for offline-safe smoke test.")
+    if env_mode != mode:
+        os.environ["RAG_LLM_CLIENT"] = mode
+    return mode
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Run a lightweight RAG smoke test.")
     parser.add_argument(
@@ -98,9 +111,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--pack-top", type=int, default=4, help="Snippets to pack")
     parser.add_argument("--threshold", type=float, default=0.25, help="Similarity threshold")
     parser.add_argument("--retries", type=int, default=config.DEFAULT_RETRIES, help="LLM retry count")
+    parser.add_argument(
+        "--client",
+        choices=["mock", "ollama"],
+        help="Force a specific LLM client (defaults to env or falls back to mock for offline safety)",
+    )
 
     args = parser.parse_args(argv)
-    return run_smoke_test(args.question, args.top_k, args.pack_top, args.threshold, args.retries)
+    client_mode = _configure_llm_client(args.client)
+    return run_smoke_test(args.question, args.top_k, args.pack_top, args.threshold, args.retries, client_mode)
 
 
 if __name__ == "__main__":  # pragma: no cover - manual utility

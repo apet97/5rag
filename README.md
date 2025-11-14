@@ -26,13 +26,22 @@ A local, stateless, closed-book Retrieval-Augmented Generation (RAG) chatbot for
 
 ## Quick Start
 
+### 5-Step Setup
+1. **Clone + install** – `git clone https://github.com/apet97/1rag.git && cd 1rag`, create a virtual env, and run `pip install -e '.[dev]'` (or `pip install .` for runtime-only environments). The legacy `pip install -r requirements.txt` path now maps to `-e .`.
+2. **Configure** – copy `.env.example` to `.env`, set `RAG_OLLAMA_URL` (`http://10.127.0.1:11434` locally or `http://10.127.0.192:11434` on the VPN), and adjust timeouts/retries.
+3. **Validate workstation** – run `make deps-check` (pip check + targeted pytest) followed by `ragctl doctor --verbose` to confirm dependencies, index readiness, and Ollama connectivity.
+4. **Ingest / index** – `make ingest` builds chunks, embeddings, FAISS/BM25 artifacts, and `index.meta.json`.
+5. **Smoke test + run** – `make smoke` (mock client by default) followed by `python3 -m clockify_rag.cli_modern chat` or `uvicorn clockify_rag.api:app`.
+
+See `docs/CONFIGURATION.md` for every configurable parameter and `docs/OPERATIONS.md` for day-two operational procedures.
+
 ### Installation
 
 **Standard (Linux/macOS Intel)**:
 ```bash
 python3 -m venv rag_env
 source rag_env/bin/activate
-pip install -r requirements.txt
+pip install -e '.[dev]'  # or `pip install .` for runtime-only installs
 ```
 
 **Apple Silicon (M1/M2/M3) - Recommended**:
@@ -40,9 +49,10 @@ pip install -r requirements.txt
 # Use conda for best FAISS compatibility
 conda create -n rag_env python=3.11
 conda activate rag_env
-conda install -c conda-forge faiss-cpu=1.8.0 numpy requests
-conda install -c pytorch sentence-transformers pytorch
-pip install urllib3==2.2.3 rank-bm25==0.2.2
+conda install -c conda-forge faiss-cpu=1.8.0 numpy pandas requests beautifulsoup4 pypdf2 python-docx
+conda install -c pytorch pytorch
+conda install -c conda-forge sentence-transformers
+pip install -e '.[dev]'  # pulls rank-bm25, typer, httpx, etc.
 ```
 
 For detailed M1 installation instructions, see [M1_COMPATIBILITY.md](M1_COMPATIBILITY.md).
@@ -101,22 +111,25 @@ python3 clockify_support_cli_final.py ask "How do I track time in Clockify?" --r
 python3 clockify_support_cli_final.py --selftest
 ```
 
-The self-test command generates a synthetic index on the fly, verifies that index artifacts load correctly, and exercises a hybrid retrieval smoke test so you can validate deployments without rebuilding the full knowledge base.
-
 > `ragctl query --json` and `clockify_support_cli_final.py ask --json` emit the same schema as `/v1/query`, including `metadata`, `routing`, and `timing` fields so scripts can automate routing decisions.
 
 ### Smoke Test (offline or remote)
 
 ```bash
-# Deterministic mock client (safe for CI/offline laptops)
-RAG_LLM_CLIENT=mock make smoke
+# Deterministic mock client (default)
+make smoke
+
+# Dependency + pytest smoke (pip check + targeted tests)
+make deps-check
 
 # Full stack against the VPN-hosted Ollama server
 RAG_OLLAMA_URL=http://10.127.0.192:11434 \
 RAG_LLM_CLIENT=ollama make smoke
+# or
+python3 scripts/smoke_rag.py --client ollama --question "How do I track time?"
 ```
 
-`make smoke` wraps `scripts/smoke_rag.py`, which loads the local index, runs `answer_once`, and prints routing + latency stats. Non-zero exit codes indicate refusal/error so you can fail fast before exposing the API.
+`make smoke` wraps `scripts/smoke_rag.py`, which now defaults to the deterministic mock LLM client so CI/laptops stay offline. Pass `--client ollama` (or export `RAG_LLM_CLIENT=ollama`) to hit the real endpoint. The script loads the local index, runs `answer_once`, and prints routing + latency stats; non-zero exit codes indicate refusal/error so you can fail fast before exposing the API. `make deps-check` is a lightweight dependency health gate (`pip check` + `pytest tests/test_api_client.py tests/test_config_module.py`) that should stay green on every workstation. See [VERIFICATION.md](VERIFICATION.md) for the full validation script.
 
 ## What's New in v4.1.2
 
@@ -195,6 +208,9 @@ python3 clockify_support_cli_final.py --selftest
 - `CLAUDE.md` – Architecture, common tasks, configuration guide
 - `START_HERE.md` – Entry point for new users
 - `SUPPORT_CLI_QUICKSTART.md` – 5-minute quick start
+- `docs/ARCHITECTURE.md` – entry points, data flow, and component responsibilities
+- `docs/OPERATIONS.md` – runbook for rebuilds, deployments, smoke/eval workflows
+- `docs/RAG_PROD_CHECKLIST.md` – pre-flight checklist for configuration, ingestion, and ops
 
 **Testing & Validation**
 - `scripts/smoke.sh` – Smoke test suite
@@ -214,10 +230,9 @@ python3 clockify_support_cli_final.py --selftest
 
 ### Security 🔒
 - `allow_redirects=False` prevents auth header leaks
-- `trust_env=False` by default (set `ALLOW_PROXIES=1` or legacy `USE_PROXY=1` to enable)
+- `trust_env=False` by default (set `USE_PROXY=1` to enable)
 - All POST calls use explicit (connect, read) timeouts
 - Policy guardrails for sensitive queries
-- `/v1/ingest` is disabled (HTTP 403) unless `RAG_AUTH_MODE` is set to `api_key` or `jwt`, ensuring only authenticated operators can rebuild the index
 
 ## DeepSeek Ollama Shim – Production Guidance
 
@@ -294,7 +309,7 @@ python3 clockify_support_cli.py chat \
 
 ### With Proxy
 ```bash
-ALLOW_PROXIES=1 python3 clockify_support_cli.py chat  # USE_PROXY=1 also works
+USE_PROXY=1 python3 clockify_support_cli.py chat
 ```
 
 ## Testing
@@ -570,40 +585,16 @@ RAG_NO_LOG              # Disable logging: 1/0 (default: 0)
 RAG_LOG_INCLUDE_ANSWER  # Include answer text: 1/0 (default: 1)
 RAG_LOG_ANSWER_PLACEHOLDER  # Placeholder when answer redacted (default: [REDACTED])
 RAG_LOG_INCLUDE_CHUNKS  # Include chunk text: 1/0 (default: 0 for security)
-RAG_LOG_FILE_MAX_BYTES  # Rotate query log after N bytes (default: 5000000 ≈ 5 MB)
-RAG_LOG_FILE_BACKUP_COUNT  # Number of rotated files to keep (default: 5)
 ```
 See [LOGGING_CONFIG.md](LOGGING_CONFIG.md) for comprehensive logging documentation.
 
 ### Caching & Rate Limiting
 ```bash
-CACHE_MAXSIZE                # Query cache size (default: 100)
-CACHE_TTL                    # Cache TTL in seconds (default: 3600)
-RATE_LIMIT_REQUESTS          # Backward-compatible alias for RATE_LIMIT_IDENTITY_REQUESTS
-RATE_LIMIT_WINDOW            # Backward-compatible alias for RATE_LIMIT_IDENTITY_WINDOW
-RATE_LIMIT_IDENTITY_REQUESTS # Max requests per caller identity (default: 10)
-RATE_LIMIT_IDENTITY_WINDOW   # Sliding window for identity limit (default: 60)
-RATE_LIMIT_GLOBAL_REQUESTS   # Optional aggregate limit across all clients (default: disabled)
-RATE_LIMIT_GLOBAL_WINDOW     # Window in seconds for the global limit
-RATE_LIMIT_BACKEND           # "memory" (default) or "redis" for distributed throttling
-RATE_LIMIT_REDIS_URL         # Redis URL when backend=redis (default: redis://127.0.0.1:6379/0)
-RATE_LIMIT_REDIS_TIMEOUT     # Redis socket/connect timeout in seconds (default: 1.0)
-RATE_LIMIT_REDIS_RETRIES     # Redis operation retries before failing open (default: 2)
-RATE_LIMIT_NAMESPACE         # Prefix for distributed counters (default: clockify:rate)
+CACHE_MAXSIZE           # Query cache size (default: 100)
+CACHE_TTL               # Cache TTL in seconds (default: 3600)
+RATE_LIMIT_REQUESTS     # Max requests per window (default: 10)
+RATE_LIMIT_WINDOW       # Window in seconds (default: 60)
 ```
-
-The in-memory limiter enforces a sliding window per caller identity (CLI process, API key, or client IP) and,
-optionally, a global aggregate limit. Setting `RATE_LIMIT_IDENTITY_REQUESTS=0`/`RATE_LIMIT_IDENTITY_WINDOW=0`
-disables per-identity throttling while still allowing a global ceiling to be applied.
-
-#### Distributed rate limiting (Redis)
-
-Set `RATE_LIMIT_BACKEND=redis` to enable the new distributed limiter. Provide the Redis URL, optional namespace,
-and (if desired) a global aggregate cap to coordinate limits across multiple API or CLI instances. The application
-ships with the `redis` Python client; you only need to provision a Redis service (managed cloud instance or
-Docker/Kubernetes deployment) that all workers can reach. The limiter will retry transient errors and automatically
-fall back to the in-memory implementation if Redis is unreachable during startup, while API/CLI callers fail open
-when a backend outage happens mid-flight so queries are never blocked by infrastructure issues.
 
 ### Query Expansion
 ```bash

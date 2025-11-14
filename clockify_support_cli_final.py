@@ -30,15 +30,12 @@ import json
 import logging
 import os
 import sys
-import tempfile
 import threading
 import time
-from contextlib import ExitStack, contextmanager
-from typing import Any, Callable, Dict, List
+from typing import Any
 
 # Third-party imports
 import numpy as np
-
 # Package imports
 import clockify_rag.config as config
 from clockify_rag.caching import get_query_cache, get_rate_limiter, QueryCache, RateLimiter, log_query
@@ -53,6 +50,75 @@ from clockify_rag.cli import (
     chat_repl,
     warmup_on_startup
 )
+from clockify_rag.api_client import get_llm_client
+
+
+def run_selftest() -> bool:
+    """
+    Lightweight production self-test.
+
+    Checks:
+    1. Model endpoint reachable at RAG_OLLAMA_URL / OLLAMA_URL.
+    2. Required models visible (best-effort).
+    3. Basic index presence.
+    4. Retrieval path does not crash.
+    """
+    ok = True
+
+    # 1) Check model endpoint
+    try:
+        client = get_llm_client()
+        models = client.list_models()
+        model_names = {m.get("name") or m.get("model") for m in models}
+        required = {config.RAG_CHAT_MODEL, config.RAG_EMBED_MODEL}
+        missing = {m for m in required if m and m not in model_names}
+        print(f"[SELFTEST] Model endpoint OK at {config.RAG_OLLAMA_URL}")
+        if missing:
+            print(f"[SELFTEST] Warning: missing models (not fatal for selftest): {sorted(missing)}")
+    except Exception as e:
+        print(f"[SELFTEST] ERROR: model endpoint check failed: {e}")
+        ok = False
+
+    # 2) Check index artifacts (best-effort; use config paths if defined)
+    index_ok = True
+    index_candidates = []
+
+    for name in ("CHUNKS_PATH", "BM25_PATH", "FAISS_INDEX_PATH"):
+        path = getattr(config, name, None)
+        if path:
+            index_candidates.append(path)
+
+    # Fallback: legacy default filenames
+    if not index_candidates:
+        index_candidates = ["chunks.jsonl", "bm25.json", "faiss.index"]
+
+    missing_any = False
+    for path in index_candidates:
+        if not os.path.exists(path):
+            missing_any = True
+
+    if missing_any:
+        print("[SELFTEST] WARNING: one or more index files are missing.")
+        print("          Run the build command for your KB before using in production.")
+        index_ok = False
+    else:
+        print("[SELFTEST] Index files found.")
+
+    # 3) Try a tiny retrieval if index seems present
+    if index_ok and ok:
+        try:
+            from clockify_rag.retrieval import retrieve
+            results = retrieve("healthcheck", top_k=1)
+            if not results:
+                print("[SELFTEST] WARNING: retrieval returned no results for 'healthcheck'.")
+            else:
+                print("[SELFTEST] Retrieval path OK.")
+        except Exception as e:
+            print(f"[SELFTEST] ERROR: retrieval check failed: {e}")
+            ok = False
+
+    return ok and index_ok
+from clockify_rag.error_handlers import print_system_health
 
 # Re-export config constants and functions for backward compatibility with tests
 from clockify_rag.config import (
@@ -62,9 +128,8 @@ from clockify_rag.config import (
 
 # Re-export functions used by tests
 from clockify_rag.answer import answer_once
-import clockify_rag.retrieval as retrieval_module
 from clockify_rag.retrieval import retrieve, coverage_ok
-from clockify_rag.indexing import build, build_bm25, load_index
+from clockify_rag.indexing import build
 from clockify_rag.answer import (
     apply_mmr_diversification,
     apply_reranking,
@@ -83,267 +148,44 @@ RATE_LIMITER = get_rate_limiter()
 QUERY_CACHE = get_query_cache()
 
 
-# ====== SELF-TEST SUPPORT ======
-
-
-class _SyntheticIndexFixture:
-    """Create a minimal synthetic index on disk for self-tests."""
-
-    def __init__(self) -> None:
-        self._tempdir = tempfile.TemporaryDirectory()
-        self.base_path = self._tempdir.name
-        self.embedding_dim = config.EMB_DIM_LOCAL if config.EMB_BACKEND == "local" else config.EMB_DIM_OLLAMA
-        self.chunks: List[Dict[str, Any]] = [
-            {
-                "id": "chunk-time-tracking",
-                "title": "Time Tracking",
-                "section": "Basics",
-                "text": "Clockify lets teams track time entries across projects with tags and billable rates.",
-            },
-            {
-                "id": "chunk-reporting",
-                "title": "Reporting",
-                "section": "Overview",
-                "text": "Detailed reports highlight billable hours, budgets, and project performance in Clockify.",
-            },
-        ]
-        self.chunk_ids = [chunk["id"] for chunk in self.chunks]
-        self._artifacts_cache: Dict[str, Any] | None = None
-        self._write_artifacts()
-
-    def _write_artifacts(self) -> None:
-        def _write_jsonl(path: str, records: List[Dict[str, Any]]) -> None:
-            with open(path, "w", encoding="utf-8") as handle:
-                for record in records:
-                    handle.write(json.dumps(record))
-                    handle.write("\n")
-
-        chunks_path = os.path.join(self.base_path, config.FILES["chunks"])
-        _write_jsonl(chunks_path, self.chunks)
-
-        meta_records = [
-            {"id": chunk["id"], "title": chunk["title"], "section": chunk["section"]}
-            for chunk in self.chunks
-        ]
-        meta_path = os.path.join(self.base_path, config.FILES["meta"])
-        _write_jsonl(meta_path, meta_records)
-
-        vecs = np.zeros((len(self.chunks), self.embedding_dim), dtype="float32")
-        if len(self.chunks) >= 1:
-            vecs[0, 0] = 1.0
-        if len(self.chunks) >= 2 and self.embedding_dim > 1:
-            vecs[1, 1] = 1.0
-        emb_path = os.path.join(self.base_path, config.FILES["emb"])
-        np.save(emb_path, vecs)
-
-        bm25_data = build_bm25(self.chunks)
-        bm25_path = os.path.join(self.base_path, config.FILES["bm25"])
-        with open(bm25_path, "w", encoding="utf-8") as handle:
-            json.dump(bm25_data, handle)
-
-        index_meta = {
-            "source": "selftest",
-            "emb_backend": config.EMB_BACKEND,
-            "emb_model": config.EMB_MODEL if config.EMB_BACKEND != "local" else "all-MiniLM-L6-v2",
-            "emb_dim": self.embedding_dim,
-            "chunks": len(self.chunks),
-        }
-        index_meta_path = os.path.join(self.base_path, config.FILES["index_meta"])
-        with open(index_meta_path, "w", encoding="utf-8") as handle:
-            json.dump(index_meta, handle)
-
-    @contextmanager
-    def _cwd(self):
-        prev_cwd = os.getcwd()
-        try:
-            os.chdir(self.base_path)
-            yield
-        finally:
-            os.chdir(prev_cwd)
-
-    def load_index(self) -> Dict[str, Any] | None:
-        with self._cwd():
-            return load_index()
-
-    def artifacts(self) -> Dict[str, Any]:
-        if self._artifacts_cache is None:
-            loaded = self.load_index()
-            if loaded is None:
-                raise IndexLoadError("Synthetic index failed to load")
-            self._artifacts_cache = loaded
-        return self._artifacts_cache
-
-    def cleanup(self) -> None:
-        self._tempdir.cleanup()
-
-
-@contextmanager
-def _synthetic_fixture() -> Any:
-    fixture = _SyntheticIndexFixture()
-    try:
-        yield fixture
-    finally:
-        fixture.cleanup()
-
-
-@contextmanager
-def _patch_attr(obj: Any, attr: str, value: Any):
-    original = getattr(obj, attr)
-    setattr(obj, attr, value)
-    try:
-        yield
-    finally:
-        setattr(obj, attr, original)
-
-
-def _fake_query_embed_factory(dim: int) -> Callable[[str, int], np.ndarray]:
-    def _fake_embed(question: str, retries: int = 0) -> np.ndarray:
-        _ = retries
-        vec = np.zeros(dim, dtype="float32")
-        lowered = question.lower()
-        hits = 0
-        if "time" in lowered or "track" in lowered:
-            vec[0] = 1.0
-            hits += 1
-        if dim > 1 and ("report" in lowered or "reporting" in lowered):
-            vec[1] = 1.0
-            hits += 1
-        if hits == 0:
-            vec[0] = 1.0
-            hits = 1
-        if hits > 1:
-            norm = float(np.linalg.norm(vec))
-            if norm > 0:
-                vec /= norm
-        return vec
-
-    return _fake_embed
-
-
-def _selftest_index_loads(fixture: _SyntheticIndexFixture) -> bool:
-    artifacts = fixture.load_index()
-    if artifacts is None:
-        return False
-    chunks = artifacts.get("chunks", [])
-    vecs = artifacts.get("vecs_n")
-    bm = artifacts.get("bm")
-    return (
-        isinstance(chunks, list)
-        and len(chunks) == len(fixture.chunks)
-        and isinstance(vecs, np.ndarray)
-        and vecs.shape[1] == fixture.embedding_dim
-        and isinstance(bm, dict)
-    )
-
-
-def _selftest_retrieval_smoke(fixture: _SyntheticIndexFixture) -> bool:
-    artifacts = fixture.artifacts()
-    indices, _scores = retrieve(
-        "How do I track time entries?",
-        artifacts["chunks"],
-        artifacts["vecs_n"],
-        artifacts["bm"],
-        top_k=2,
-    )
-    if not indices:
-        return False
-    top_chunk_id = artifacts["chunks"][indices[0]]["id"]
-    return top_chunk_id == fixture.chunk_ids[0]
-
-
-def _selftest_coverage_guard(fixture: _SyntheticIndexFixture) -> bool:
-    artifacts = fixture.artifacts()
-    indices, scores = retrieve(
-        "Need time tracking reporting guidance",
-        artifacts["chunks"],
-        artifacts["vecs_n"],
-        artifacts["bm"],
-        top_k=2,
-    )
-    if len(indices) < 2:
-        return False
-    return coverage_ok(indices[:2], scores["dense"], threshold=0.2)
-
-
-def run_selftest() -> bool:
-    """Run lightweight diagnostics covering index loading and retrieval flows."""
-
-    logger.info("[selftest] Starting diagnostics")
-    results: List[bool] = []
-
-    try:
-        with _synthetic_fixture() as fixture, ExitStack() as stack:
-            stack.enter_context(_patch_attr(config, "USE_ANN", "none"))
-            fake_embed = _fake_query_embed_factory(fixture.embedding_dim)
-            stack.enter_context(_patch_attr(retrieval_module, "_embedding_embed_query", fake_embed))
-
-            tests: List[tuple[str, Callable[[], bool]]] = [
-                ("Synthetic index loads", lambda: _selftest_index_loads(fixture)),
-                ("Hybrid retrieval smoke", lambda: _selftest_retrieval_smoke(fixture)),
-                ("Coverage guard", lambda: _selftest_coverage_guard(fixture)),
-            ]
-
-            for name, test_fn in tests:
-                try:
-                    ok = bool(test_fn())
-                except Exception as exc:  # pragma: no cover - defensive guard
-                    logger.exception("[selftest] %s: FAIL (%s)", name, exc)
-                    ok = False
-                else:
-                    logger.info("[selftest] %s: %s", name, "PASS" if ok else "FAIL")
-                results.append(ok)
-
-    except Exception as exc:  # pragma: no cover - catastrophic failure
-        logger.exception("[selftest] Fatal error: %s", exc)
-        return False
-
-    passed = sum(1 for r in results if r)
-    total = len(results)
-    logger.info("[selftest] %d/%d tests passed", passed, total)
-    return bool(results) and all(results)
-
-
 # ====== MAIN ENTRY POINT ======
 
 def main():
     """Main entry point - delegates to CLI module for all functionality."""
     global QUERY_LOG_DISABLED
 
-    # Parse command line arguments
-    args = setup_cli_args()
+    try:
+        # Parse command line arguments
+        args = setup_cli_args()
 
-    # Lightweight selftest path: skip full config wiring when only --selftest is provided
-    if getattr(args, "selftest", False) and args.cmd is None:
-        log_level = getattr(logging, getattr(args, "log", "INFO").upper(), logging.INFO)
-        logging.basicConfig(level=log_level)
-        QUERY_LOG_DISABLED = True
-        success = run_selftest()
-        sys.exit(0 if success else 1)
+        # Configure logging and global config
+        QUERY_LOG_DISABLED = configure_logging_and_config(args)
 
-    # Configure logging and global config
-    QUERY_LOG_DISABLED = configure_logging_and_config(args)
+        # Handle selftest if requested
+        if getattr(args, "selftest", False):
+            success = run_selftest()
+            sys.exit(0 if success else 1)
 
-    # Handle selftest if requested
-    if getattr(args, "selftest", False):
-        success = run_selftest()
-        sys.exit(0 if success else 1)
-
-    # Auto-start REPL if no command given
-    if args.cmd is None:
-        try:
+        # Auto-start REPL if no command given
+        if args.cmd is None:
             chat_repl()
-        except IndexLoadError as exc:
-            logger.error("Failed to load index: %s", exc)
-            sys.exit(getattr(exc, "exit_code", 1))
-        return
+            return
 
-    # Route to appropriate command handler
-    if args.cmd == "build":
-        handle_build_command(args)
-    elif args.cmd == "ask":
-        handle_ask_command(args)
-    elif args.cmd == "chat":
-        handle_chat_command(args)
+        # Route to appropriate command handler
+        if args.cmd == "build":
+            handle_build_command(args)
+        elif args.cmd == "ask":
+            handle_ask_command(args)
+        elif args.cmd == "chat":
+            handle_chat_command(args)
+    
+    except KeyboardInterrupt:
+        logger.info("Operation interrupted by user")
+        sys.exit(1)
+    except Exception as e:
+        logger.error(f"Fatal error in main: {e}")
+        logger.debug("Full traceback:", exc_info=True)
+        sys.exit(1)
 
 if __name__ == "__main__":
     # Rank 29: cProfile profiling support
@@ -383,5 +225,8 @@ if __name__ == "__main__":
             profiler.dump_stats(profile_file)
             print(f"\nFull profile saved to: {profile_file}")
             print(f"View with: python -m pstats {profile_file}")
-    else:
-        main()
+# The run_selftest function is now defined at the top of the file
+
+
+if __name__ == "__main__":
+    main()

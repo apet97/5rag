@@ -57,6 +57,16 @@ def pytest_configure(config):
 
 from clockify_rag.indexing import build_bm25
 from clockify_rag.config import DEFAULT_TOP_K
+from clockify_rag.api_client import MockLLMClient, set_llm_client
+
+
+@pytest.fixture(autouse=True)
+def use_mock_llm_client():
+    """Route all LLM calls through the deterministic mock client."""
+    client = MockLLMClient()
+    set_llm_client(client)
+    yield
+    set_llm_client(None)
 
 
 @pytest.fixture

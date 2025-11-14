@@ -10,39 +10,19 @@ import json
 import logging
 import os
 import sys
-import time
 import numpy as np
-from typing import Tuple, Optional, Any
+from typing import Tuple, Optional, Any, List
 
 from . import config
 from .indexing import build, load_index
 from .utils import _log_config_summary, validate_and_set_config, validate_chunk_config, check_pytorch_mps
 from .answer import answer_once, answer_to_json
-from .caching import RateLimitError, get_query_cache, get_rate_limiter
+from .caching import get_query_cache
 from .retrieval import set_query_expansion_path, load_query_expansion_dict, QUERY_EXPANSIONS_ENV_VAR
-from .http_utils import http_post_with_retries
 from .precomputed_cache import get_precomputed_cache
-from .exceptions import ValidationError, IndexLoadError
-from .logging_utils import log_query_event
+from .api_client import get_llm_client, ChatCompletionOptions, ChatMessage
 
 logger = logging.getLogger(__name__)
-QUERY_LOG_DISABLED = False
-
-
-def _log_cli_query(question: str, result: dict, chunks, latency_ms: float, channel: str) -> None:
-    """Persist query metadata unless logging is disabled."""
-
-    if not result:
-        return
-
-    log_query_event(
-        question,
-        result,
-        chunks,
-        latency_ms,
-        channel=channel,
-        disabled=QUERY_LOG_DISABLED,
-    )
 
 
 def ensure_index_ready(retries=0) -> Tuple:
@@ -52,37 +32,60 @@ def ensure_index_ready(retries=0) -> Tuple:
         Tuple of (chunks, vecs_n, bm, hnsw) for backward compatibility with CLI code.
         The library's load_index() returns a dict, which we unpack here.
     """
+    from .error_handlers import log_and_raise
+    from .exceptions import IndexLoadError
 
     artifacts_ok = True
+    missing_files = []
     for fname in [config.FILES["chunks"], config.FILES["emb"], config.FILES["meta"], config.FILES["bm25"], config.FILES["index_meta"]]:
         if not os.path.exists(fname):
             artifacts_ok = False
-            break
+            missing_files.append(fname)
 
     if not artifacts_ok:
-        logger.info("[rebuild] artifacts missing or invalid: building from knowledge_full.md...")
+        logger.info(f"[rebuild] artifacts missing or invalid: building from knowledge_full.md... (missing: {', '.join(missing_files)})")
         if os.path.exists("knowledge_full.md"):
-            build("knowledge_full.md", retries=retries)
+            try:
+                build("knowledge_full.md", retries=retries)
+            except Exception as e:
+                log_and_raise(
+                    IndexLoadError,
+                    f"Failed to build index: {str(e)}",
+                    "check knowledge_full.md file and configuration"
+                )
         else:
-            message = "knowledge_full.md not found"
-            logger.error(message)
-            raise IndexLoadError(message)
+            log_and_raise(
+                IndexLoadError,
+                "knowledge_full.md not found",
+                "provide a valid knowledge base file to build the index"
+            )
 
     result = load_index()
     if result is None:
         logger.info("[rebuild] artifact validation failed: rebuilding...")
         if os.path.exists("knowledge_full.md"):
-            build("knowledge_full.md", retries=retries)
-            result = load_index()
+            try:
+                build("knowledge_full.md", retries=retries)
+                result = load_index()
+            except Exception as e:
+                log_and_raise(
+                    IndexLoadError,
+                    f"Failed to rebuild index: {str(e)}",
+                    "check knowledge_full.md file and configuration"
+                )
         else:
-            message = "knowledge_full.md not found"
-            logger.error(message)
-            raise IndexLoadError(message)
+            log_and_raise(
+                IndexLoadError,
+                "knowledge_full.md not found after validation failure",
+                "provide a valid knowledge base file to build the index"
+            )
 
     if result is None:
-        message = "Failed to load artifacts after rebuild"
-        logger.error(message)
-        raise IndexLoadError(message)
+        log_and_raise(
+            IndexLoadError,
+            "Failed to load artifacts after rebuild",
+            "the index may be corrupted; try deleting index files and rebuilding"
+        )
 
     # Handle both dict (from library) and tuple (from test mocks) for backward compatibility
     if isinstance(result, dict):
@@ -95,7 +98,11 @@ def ensure_index_ready(retries=0) -> Tuple:
         # Test mocks return a tuple (chunks, vecs_n, bm, hnsw)
         chunks, vecs_n, bm, hnsw = result
     else:
-        raise TypeError(f"load_index() must return dict or tuple, got {type(result)}")
+        log_and_raise(
+            TypeError,
+            f"load_index() must return dict or tuple, got {type(result)}",
+            "contact support - this indicates a system error"
+        )
 
     return chunks, vecs_n, bm, hnsw
 
@@ -133,9 +140,6 @@ def chat_repl(top_k=12, pack_top=6, threshold=0.30, use_rerank=False, debug=Fals
 
     debug_enabled = debug  # Local toggle
 
-    limiter = get_rate_limiter()
-    limiter_identity = f"cli-repl:{os.getpid()}"
-
     while True:
         try:
             question = input("\n> ").strip()
@@ -154,113 +158,69 @@ def chat_repl(top_k=12, pack_top=6, threshold=0.30, use_rerank=False, debug=Fals
             print(f"Debug mode: {'ON' if debug_enabled else 'OFF'}")
             continue
 
-        try:
-            allowed = limiter.allow_request(limiter_identity)
-        except RateLimitError as exc:
-            logger.warning("Rate limiter unavailable (%s). Allowing question.", exc)
-            allowed = True
-
-        if not allowed:
-            try:
-                wait_seconds = limiter.wait_time(limiter_identity)
-            except RateLimitError as exc:
-                logger.warning("Rate limiter wait_time failed (%s). Defaulting to immediate retry message.", exc)
-                wait_seconds = 0.0
-            wait_msg = f"Please wait {wait_seconds:.0f}s and try again."
-            print(f"⚠️  Too many questions at once. {wait_msg}")
-            continue
-
         # OPTIMIZATION (Analysis Section 9.1 #3): Check FAQ cache first for instant responses
         faq_result = None
         if faq_cache:
             faq_result = faq_cache.get(question, fuzzy=True)
 
-        used_answer_once = False
         if faq_result:
-            # FAQ cache hit - synthesize result compatible with answer_once output
-            cached_chunks = faq_result.get("packed_chunks", [])
-            cached_chunk_ids = faq_result.get("packed_chunk_ids") or faq_result.get("selected_chunk_ids") or []
             result = {
                 "answer": faq_result["answer"],
                 "refused": False,
                 "confidence": faq_result.get("confidence"),
-                "selected_chunks": cached_chunks,
-                "selected_chunk_ids": cached_chunk_ids,
-                "packed_chunks": cached_chunks,
-                "packed_chunk_ids": cached_chunk_ids,
-                "context_block": "",
-                "timing": {},
+                "selected_chunks": faq_result.get("packed_chunks", []),
                 "metadata": {
                     "used_tokens": 0,
-                    "retrieval_count": len(cached_chunks),
-                    "packed_count": len(cached_chunks),
                     "cache_type": "faq_precomputed",
                 },
-                "routing": faq_result.get("routing"),
+                "routing": {"action": "cache"},
             }
             if debug_enabled:
                 print("[DEBUG] FAQ cache hit (precomputed answer)")
-            latency_ms = None
         else:
-            # FAQ cache miss - normal retrieval
-            try:
-                call_start = time.time()
-                result = answer_once(
-                    question,
-                    chunks,
-                    vecs_n,
-                    bm,
-                    top_k=top_k,
-                    pack_top=pack_top,
-                    threshold=threshold,
-                    use_rerank=use_rerank,
-                    hnsw=hnsw,
-                    seed=seed,
-                    num_ctx=num_ctx,
-                    num_predict=num_predict,
-                    retries=retries
-                )
-                latency_ms = (time.time() - call_start) * 1000
-                used_answer_once = True
-            except ValidationError as exc:
-                print(f"Validation error: {exc}")
-                continue
+            result = answer_once(
+                question,
+                chunks,
+                vecs_n,
+                bm,
+                top_k=top_k,
+                pack_top=pack_top,
+                threshold=threshold,
+                use_rerank=use_rerank,
+                hnsw=hnsw,
+                seed=seed,
+                num_ctx=num_ctx,
+                num_predict=num_predict,
+                retries=retries,
+            )
 
-        answer_text = result.get("answer", "")
-        citations = result.get("selected_chunk_ids") or result.get("selected_chunks", [])
-        metadata = result.get("metadata", {}) or {}
+        answer = result["answer"]
+        metadata = result.get("metadata", {})
+        selected_chunks = result.get("selected_chunks", [])
 
         if use_json:
             # v4.1: JSON output mode
             used_tokens = metadata.get("used_tokens")
             if used_tokens is None:
-                used_tokens = len(citations)
+                used_tokens = len(selected_chunks)
             output = {
-                "answer": answer_text,
-                "citations": citations,
+                "answer": answer,
+                "citations": selected_chunks,
                 "used_tokens": used_tokens,
                 "topk": top_k,
-                "packed": len(citations),
+                "packed": len(selected_chunks),
                 "confidence": result.get("confidence"),
             }
             print(json.dumps(output, ensure_ascii=False, indent=2))
         else:
-            print(f"\n{answer_text}")
-
-        if used_answer_once:
-            _log_cli_query(
-                question,
-                result,
-                chunks,
-                latency_ms if latency_ms is not None else result.get("timing", {}).get("total_ms", 0.0),
-                channel="cli-chat",
-            )
+            print(f"\n{answer}")
 
         # Show debug info if enabled
         if debug_enabled:
-            print(f"\n[DEBUG] Retrieved: {len(citations)} chunks")
-            if metadata:
-                print(f"[DEBUG] Metadata: {metadata}")
+            print(f"\n[DEBUG] Retrieved: {len(selected_chunks)} chunks")
+            scores = metadata.get("scores", [])
+            if scores:
+                print(f"[DEBUG] Scores: {scores[:5]}")
 
     # Save cache on exit
     query_cache.save()
@@ -272,7 +232,7 @@ def warmup_on_startup():
 
     OPTIMIZATION: Preloads FAISS index to eliminate 50-200ms penalty on first query.
     """
-    warmup_enabled = os.environ.get("WARMUP", "1").lower() in ("1", "true", "yes")
+    warmup_enabled = config.WARMUP_ENABLED
     if not warmup_enabled:
         logger.debug("Warm-up disabled via WARMUP=0")
         return
@@ -282,19 +242,18 @@ def warmup_on_startup():
     # Warm-up embedding (Rank 3: 50-100ms saved on first query)
     try:
         from .embedding import embed_texts
-        embed_texts(["warmup query"])
+        embed_texts(["warmup query"], suppress_errors=True)
     except Exception as e:
         logger.warning(f"Embedding warmup failed: {e}")
 
     # Warm-up LLM (Rank 3: 200-500ms saved on first query)
     try:
-        from .http_utils import http_post_with_retries
-        payload = {"model": config.GEN_MODEL, "prompt": "Hi", "options": {"num_predict": 1}}
-        http_post_with_retries(
-            f"{config.OLLAMA_URL}/api/generate",
-            payload,
-            retries=0,
-            timeout=(3, 10)
+        client = get_llm_client()
+        client.generate_text(
+            prompt="Hi",
+            model=config.RAG_CHAT_MODEL,
+            options={"num_predict": 1, "seed": config.DEFAULT_SEED},
+            timeout=(config.CHAT_CONNECT_T, config.CHAT_READ_T),
         )
     except Exception as e:
         logger.warning(f"LLM warmup failed: {e}")
@@ -355,11 +314,11 @@ def setup_cli_args():
     ap.add_argument("--no-log", action="store_true",
                     help="Disable query log file writes (privacy mode)")
     ap.add_argument("--ollama-url", type=str, default=None,
-                    help="Ollama endpoint (default from OLLAMA_URL env or http://127.0.0.1:11434; for remote use set to http://your-ollama-host:11434)")
+                    help="Ollama endpoint (default from RAG_OLLAMA_URL env or http://10.127.0.192:11434; override with http://127.0.0.1:11434 for local Ollama)")
     ap.add_argument("--gen-model", type=str, default=None,
-                    help="Generation model name (default from GEN_MODEL env or qwen2.5:32b)")
+                    help="Generation model name (default from RAG_CHAT_MODEL env or qwen2.5:32b)")
     ap.add_argument("--emb-model", type=str, default=None,
-                    help="Embedding model name (default from EMB_MODEL env or nomic-embed-text)")
+                    help="Embedding model name (default from RAG_EMBED_MODEL env or nomic-embed-text:latest)")
     ap.add_argument("--ctx-budget", type=int, default=None,
                     help="Context token budget (default from CTX_BUDGET env or 12000)")
     ap.add_argument("--query-expansions", type=str, default=None,
@@ -395,7 +354,6 @@ def configure_logging_and_config(args):
     Returns:
         query_log_disabled: Boolean flag for query logging
     """
-    global QUERY_LOG_DISABLED
     # Setup logging after CLI arg parsing
     level = getattr(logging, args.log if hasattr(args, "log") else "INFO")
     logging.basicConfig(level=level, format="%(levelname)s: %(message)s")
@@ -403,8 +361,8 @@ def configure_logging_and_config(args):
     # Configure query expansion dictionary overrides
     if getattr(args, "query_expansions", None):
         set_query_expansion_path(args.query_expansions)
-    elif os.environ.get(QUERY_EXPANSIONS_ENV_VAR):
-        set_query_expansion_path(os.environ[QUERY_EXPANSIONS_ENV_VAR])
+    elif config.CLOCKIFY_QUERY_EXPANSIONS:
+        set_query_expansion_path(config.CLOCKIFY_QUERY_EXPANSIONS)
     else:
         set_query_expansion_path(None)
 
@@ -415,12 +373,11 @@ def configure_logging_and_config(args):
         sys.exit(1)
 
     query_log_disabled = getattr(args, "no_log", False)
-    QUERY_LOG_DISABLED = query_log_disabled
 
     # Update globals from CLI args
-    config.EMB_BACKEND = args.emb_backend
-    config.USE_ANN = args.ann
-    config.ALPHA_HYBRID = args.alpha
+    config.EMB_BACKEND = getattr(args, 'emb_backend', config.EMB_BACKEND)
+    config.USE_ANN = getattr(args, 'ann', config.USE_ANN)
+    config.ALPHA_HYBRID = getattr(args, 'alpha', config.ALPHA_HYBRID)
 
     # Update FAISS multiplier if provided in subcommand args
     if hasattr(args, "faiss_multiplier"):
@@ -460,83 +417,48 @@ def handle_ask_command(args):
         num_predict=args.num_predict,
         retries=getattr(args, "retries", 0)
     )
-    limiter = get_rate_limiter()
-    limiter_identity = f"cli-ask:{os.getpid()}"
-
-    try:
-        allowed = limiter.allow_request(limiter_identity)
-    except RateLimitError as exc:
-        logger.warning("Rate limiter unavailable (%s). Allowing ask command.", exc)
-        allowed = True
-
-    if not allowed:
-        try:
-            wait_seconds = limiter.wait_time(limiter_identity)
-        except RateLimitError as exc:
-            logger.warning("Rate limiter wait_time failed (%s). Defaulting to immediate retry message.", exc)
-            wait_seconds = 0.0
-        wait_msg = f"Please wait {wait_seconds:.0f}s and try again."
-        print(f"⚠️  Request throttled. {wait_msg}")
-        return
-
-    try:
-        chunks, vecs_n, bm, hnsw = ensure_index_ready(retries=getattr(args, "retries", 0))
-    except IndexLoadError as exc:
-        logger.error("Failed to load index: %s", exc)
-        sys.exit(getattr(exc, "exit_code", 1))
-    try:
-        call_start = time.time()
-        result = answer_once(
-            args.question,
-            chunks,
-            vecs_n,
-            bm,
-            top_k=args.topk,
-            pack_top=args.pack,
-            threshold=args.threshold,
-            use_rerank=args.rerank,
-            hnsw=hnsw,
-            seed=args.seed,
-            num_ctx=args.num_ctx,
-            num_predict=args.num_predict,
-            retries=getattr(args, "retries", 0)
-        )
-        latency_ms = (time.time() - call_start) * 1000
-    except ValidationError as exc:
-        print(f"Validation error: {exc}")
-        return
-    answer_text = result.get("answer", "")
-    citations = result.get("selected_chunk_ids") or result.get("selected_chunks", [])
-    metadata = result.get("metadata", {}) or {}
-
+    chunks, vecs_n, bm, hnsw = ensure_index_ready(retries=getattr(args, "retries", 0))
+    result = answer_once(
+        args.question,
+        chunks,
+        vecs_n,
+        bm,
+        top_k=args.topk,
+        pack_top=args.pack,
+        threshold=args.threshold,
+        use_rerank=args.rerank,
+        hnsw=hnsw,
+        seed=args.seed,
+        num_ctx=args.num_ctx,
+        num_predict=args.num_predict,
+        retries=getattr(args, "retries", 0)
+    )
+    metadata = result.get("metadata", {})
+    timing = result.get("timing")
+    routing = result.get("routing")
+    selected_chunks = result.get("selected_chunks", [])
+    ans = result["answer"]
+    refused = result.get("refused", False)
     if getattr(args, "json", False):
         used_tokens = metadata.get("used_tokens")
         if used_tokens is None:
-            used_tokens = len(citations)
+            used_tokens = len(selected_chunks)
         output = answer_to_json(
-            answer_text,
-            citations,
+            ans,
+            selected_chunks,
             used_tokens,
             args.topk,
             args.pack,
-            result.get("confidence")
+            result.get("confidence"),
+            metadata=metadata,
+            routing=routing,
+            timing=timing,
+            refused=refused,
         )
+        output["question"] = args.question
         print(json.dumps(output, ensure_ascii=False, indent=2))
     else:
-        print(answer_text)
-
-    _log_cli_query(
-        args.question,
-        result,
-        chunks,
-        latency_ms if latency_ms is not None else result.get("timing", {}).get("total_ms", 0.0),
-        channel="cli-ask",
-    )
-
-    if getattr(args, "debug", False):
-        print(f"[DEBUG] Retrieved: {len(citations)} chunks")
-        if metadata:
-            print(f"[DEBUG] Metadata: {metadata}")
+        print(ans)
 
 
 def handle_chat_command(args):
@@ -557,64 +479,43 @@ def handle_chat_command(args):
                 seed = 42
                 np.random.seed(seed)
                 prompt = "What is Clockify?"
-                payload = {"model": config.GEN_MODEL, "prompt": prompt, "options": {"seed": seed}}
+                client = get_llm_client()
+                messages: List[ChatMessage] = [
+                    {"role": "system", "content": "Determinism check"},
+                    {"role": "user", "content": prompt},
+                ]
+                options: ChatCompletionOptions = {
+                    "seed": seed,
+                    "num_ctx": config.DEFAULT_NUM_CTX,
+                    "num_predict": config.DEFAULT_NUM_PREDICT,
+                }
 
-                r1 = http_post_with_retries(
-                    f"{config.OLLAMA_URL}/api/generate",
-                    payload,
-                    retries=2,
+                resp1 = client.chat_completion(
+                    messages=messages,
+                    model=config.RAG_CHAT_MODEL,
+                    options=dict(options),
+                    stream=False,
                     timeout=(config.CHAT_CONNECT_T, config.CHAT_READ_T),
+                    retries=retries or config.DEFAULT_RETRIES,
                 )
+                ans1 = resp1.get("message", {}).get("content", "")
 
                 np.random.seed(seed)
-                r2 = http_post_with_retries(
-                    f"{config.OLLAMA_URL}/api/generate",
-                    payload,
-                    retries=2,
+                resp2 = client.chat_completion(
+                    messages=messages,
+                    model=config.RAG_CHAT_MODEL,
+                    options=dict(options),
+                    stream=False,
                     timeout=(config.CHAT_CONNECT_T, config.CHAT_READ_T),
+                    retries=retries or config.DEFAULT_RETRIES,
                 )
+                ans2 = resp2.get("message", {}).get("content", "")
 
-                extracted = []
-                missing_details = []
-                for label, resp in (("run1", r1), ("run2", r2)):
-                    if not isinstance(resp, dict):
-                        missing_details.append(f"{label}: expected dict, got {type(resp).__name__}")
-                        extracted.append("")
-                        continue
-                    if "response" not in resp:
-                        missing_details.append(
-                            f"{label}: 'response' key missing (keys={sorted(resp.keys())})"
-                        )
-                        extracted.append("")
-                        continue
-                    value = resp["response"]
-                    if not isinstance(value, str):
-                        missing_details.append(
-                            f"{label}: 'response' must be string (got {type(value).__name__})"
-                        )
-                        extracted.append("")
-                        continue
-                    extracted.append(value)
-
-                if missing_details:
-                    detail_msg = "; ".join(missing_details)
-                    logger.error(f"[DETERMINISM] Invalid responses: {detail_msg}")
-                    print(f"[DETERMINISM] invalid responses: {detail_msg}")
-                    sys.exit(1)
-
-                ans1, ans2 = extracted
                 h1 = hashlib.md5(ans1.encode()).hexdigest()[:16]
                 h2 = hashlib.md5(ans2.encode()).hexdigest()[:16]
                 deterministic = (h1 == h2)
                 logger.info(f"[DETERMINISM] run1={h1} run2={h2} deterministic={deterministic}")
-                status = "true" if deterministic else "false"
-                print(f"[DETERMINISM] run1={h1} run2={h2} deterministic={status}")
-                if not deterministic:
-                    mismatch_msg = (
-                        f"[DETERMINISM] hash mismatch: run1_len={len(ans1)} run2_len={len(ans2)}"
-                    )
-                    logger.warning(mismatch_msg)
-                    print(mismatch_msg)
+                print(f'[DETERMINISM] run1={h1} run2={h2} deterministic={"true" if deterministic else "false"}')
                 sys.exit(0 if deterministic else 1)
             except Exception as e:
                 logger.error(f"❌ Determinism test failed: {e}")
@@ -624,19 +525,15 @@ def handle_chat_command(args):
             sys.exit(1)
 
     # Normal chat REPL
-    try:
-        chat_repl(
-            top_k=args.topk,
-            pack_top=args.pack,
-            threshold=args.threshold,
-            use_rerank=args.rerank,
-            debug=args.debug,
-            seed=args.seed,
-            num_ctx=args.num_ctx,
-            num_predict=args.num_predict,
-            retries=getattr(args, "retries", 0),
-            use_json=getattr(args, "json", False)
-        )
-    except IndexLoadError as exc:
-        logger.error("Failed to load index: %s", exc)
-        sys.exit(getattr(exc, "exit_code", 1))
+    chat_repl(
+        top_k=args.topk,
+        pack_top=args.pack,
+        threshold=args.threshold,
+        use_rerank=args.rerank,
+        debug=args.debug,
+        seed=args.seed,
+        num_ctx=args.num_ctx,
+        num_predict=args.num_predict,
+        retries=getattr(args, "retries", 0),
+        use_json=getattr(args, "json", False)
+    )

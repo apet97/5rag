@@ -7,11 +7,9 @@ import os
 from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 
 import numpy as np
-import requests
 
 from . import config
 from .exceptions import EmbeddingError
-from .http_utils import get_session
 
 logger = logging.getLogger(__name__)
 
@@ -100,24 +98,22 @@ def validate_ollama_embeddings(sample_text: str = "test") -> tuple:
     Returns: (embedding_dim: int, is_valid: bool)
     """
     try:
-        sess = get_session()
-        r = sess.post(
-            f"{config.OLLAMA_URL}/api/embeddings",
-            json={"model": config.EMB_MODEL, "prompt": sample_text},  # Use "prompt" not "input"
-            timeout=(config.EMB_CONNECT_T, config.EMB_READ_T),
-            allow_redirects=False
-        )
-        r.raise_for_status()
+        from .api_client import get_llm_client
 
-        resp_json = r.json()
-        emb = resp_json.get("embedding", [])
+        client = get_llm_client()
+        emb = client.create_embedding(
+            text=sample_text,
+            model=config.RAG_EMBED_MODEL,
+            timeout=(config.EMB_CONNECT_T, config.EMB_READ_T),
+            retries=config.DEFAULT_RETRIES,
+        )
 
         if not emb or len(emb) == 0:
-            logger.error(f"❌ Ollama {config.EMB_MODEL}: empty embedding returned (check API format)")
+            logger.error(f"❌ Ollama {config.RAG_EMBED_MODEL}: empty embedding returned (check API format)")
             return 0, False
 
         dim = len(emb)
-        logger.info(f"✅ Ollama {config.EMB_MODEL}: {dim}-dim embeddings validated")
+        logger.info(f"✅ Ollama {config.RAG_EMBED_MODEL}: {dim}-dim embeddings validated")
         return dim, True
     except Exception as e:
         logger.error(f"❌ Ollama validation failed: {e}")
@@ -136,30 +132,24 @@ def _embed_single_text(index: int, text: str, retries: int, total: int) -> tuple
     Returns:
         tuple: (index, embedding_list) or raises EmbeddingError
     """
-    # Rank 5 fix: Create thread-local session to avoid sharing across threads
-    sess = get_session(retries=retries)
+    # Use the API client for structured embedding requests
+    from .api_client import create_embedding
+    
     try:
-        r = sess.post(
-            f"{config.OLLAMA_URL}/api/embeddings",
-            json={"model": config.EMB_MODEL, "prompt": text},
-            timeout=(config.EMB_CONNECT_T, config.EMB_READ_T),
-            allow_redirects=False
-        )
-        r.raise_for_status()
-
         # Validate embedding is not empty
-        resp_json = r.json()
-        emb = resp_json.get("embedding", [])
+        emb = create_embedding(
+            text=text,
+            model=config.RAG_EMBED_MODEL,
+            timeout=(config.EMB_CONNECT_T, config.EMB_READ_T),
+            retries=retries,
+        )
+        
         if not emb or len(emb) == 0:
             raise EmbeddingError(f"Embedding chunk {index}: empty embedding returned (check Ollama API format)")
 
         return (index, emb)
-    except (requests.exceptions.ConnectTimeout, requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
-        raise EmbeddingError(f"Embedding chunk {index} failed: {e} [hint: check config.OLLAMA_URL or increase EMB timeouts]") from e
-    except requests.exceptions.RequestException as e:
-        raise EmbeddingError(f"Embedding chunk {index} request failed: {e}") from e
-    except EmbeddingError:
-        raise  # Re-raise EmbeddingError
+    except EmbeddingError as e:
+        raise EmbeddingError(f"Embedding chunk {index} failed: {e}") from e
     except Exception as e:
         raise EmbeddingError(f"Embedding chunk {index}: {e}") from e
 
@@ -182,7 +172,7 @@ def embed_texts(texts: list, retries=0) -> np.ndarray:
 
     # Parallel batching mode (always enabled for internal deployment)
     # Priority #7: Cap outstanding futures to prevent socket exhaustion
-    logger.debug(f"[Rank 10] Embedding {total} texts with {config.EMB_MAX_WORKERS} workers")
+    logger.info(f"[Rank 10] Embedding {total} texts with {config.EMB_MAX_WORKERS} workers")
     results = [None] * total  # Pre-allocate to maintain order
     completed = 0
 
@@ -220,7 +210,7 @@ def embed_texts(texts: list, retries=0) -> np.ndarray:
 
                     # Log progress every 100 completions
                     if completed % 100 == 0 or completed == total:
-                        logger.debug(f"  [{completed}/{total}]")
+                        logger.info(f"  [{completed}/{total}]")
 
                 # Submit new tasks to fill slots (up to max_outstanding)
                 while len(pending_futures) < max_outstanding:
@@ -335,7 +325,7 @@ def save_embedding_cache(cache: dict):
                     "hash": content_hash,
                     "embedding": embedding.tolist(),
                     "backend": config.EMB_BACKEND,  # Store backend for validation
-                    "model": config.EMB_MODEL if config.EMB_BACKEND == "ollama" else "all-MiniLM-L6-v2",
+                    "model": config.RAG_EMBED_MODEL if config.EMB_BACKEND == "ollama" else "all-MiniLM-L6-v2",
                     "dim": int(len(embedding))  # Store dimension for validation
                 }
                 f.write(json.dumps(entry) + "\n")
@@ -349,16 +339,27 @@ def save_embedding_cache(cache: dict):
 
 
 def embed_query(question: str, retries=0) -> np.ndarray:
-    """Embed a single query using configured backend with optional caching."""
-    # Note: This is a simplified version. Full implementation with caching
-    # would be in the retrieval module
+    """Embed a single query using configured backend with proper normalization."""
     if config.EMB_BACKEND == "local":
         vec = embed_local_batch([question], normalize=True)
         return vec[0]
     else:
-        vecs = embed_texts([question], retries=retries)
+        # Use the API client approach for single embeddings too
+        from .api_client import create_embedding
+        try:
+            embedding = create_embedding(
+                text=question,
+                model=config.RAG_EMBED_MODEL,
+                timeout=(config.EMB_CONNECT_T, config.EMB_READ_T),
+                retries=retries
+            )
+            vec = np.array(embedding, dtype=np.float32)
+        except Exception:
+            # Fallback to the old method if API client fails
+            vecs = embed_texts([question], retries=retries)
+            vec = vecs[0]
+        
         # Normalize for cosine similarity
-        vec = vecs[0]
         norm = np.linalg.norm(vec)
         if norm > 0:
             vec = vec / norm

@@ -250,6 +250,7 @@ class OllamaAPIClient(BaseLLMClient):
         
         logger.debug(f"Making chat completion request to {self.base_url}/api/chat with model {model}")
         start_time = time.time()
+        response = None
         
         try:
             response = session.post(
@@ -261,6 +262,7 @@ class OllamaAPIClient(BaseLLMClient):
             response.raise_for_status()
             
             result = response.json()
+            self._validate_chat_response(result, model)
             
             # Log performance metrics
             duration = time.time() - start_time
@@ -275,7 +277,8 @@ class OllamaAPIClient(BaseLLMClient):
             logger.error(f"Chat completion connection error: {e}")
             raise LLMUnavailableError(f"Chat completion connection error: {e}") from e
         except requests.exceptions.HTTPError as e:
-            logger.error(f"Chat completion HTTP error: {e} (status {response.status_code})")
+            status = getattr(e.response, "status_code", getattr(response, "status_code", "unknown"))
+            logger.error(f"Chat completion HTTP error: {e} (status {status})")
             raise LLMError(f"Chat completion HTTP error: {e}") from e
         except requests.exceptions.RequestException as e:
             logger.error(f"Chat completion request error: {e}")
@@ -321,7 +324,7 @@ class OllamaAPIClient(BaseLLMClient):
             retries=retries
         )
         
-        return response.get("message", {}).get("content", "")
+        return response["message"]["content"]
 
     def create_embedding(
         self,
@@ -358,6 +361,7 @@ class OllamaAPIClient(BaseLLMClient):
         # Get session with appropriate retry settings for this request
         session = get_session(retries=req_retries)
         session.trust_env = ALLOW_PROXIES
+        response = None
         
         payload: EmbeddingRequest = {
             "model": model,
@@ -382,6 +386,8 @@ class OllamaAPIClient(BaseLLMClient):
             embedding = result.get("embedding")
             if not embedding or not isinstance(embedding, list) or len(embedding) == 0:
                 raise EmbeddingError(f"Invalid embedding response: {result}")
+            if not all(isinstance(v, (int, float)) for v in embedding):
+                raise EmbeddingError(f"Embedding contains non-numeric values: {result}")
             
             # Log performance metrics
             duration = time.time() - start_time
@@ -396,7 +402,8 @@ class OllamaAPIClient(BaseLLMClient):
             logger.error(f"Embedding creation connection error: {e}")
             raise EmbeddingError(f"Embedding creation connection error: {e}") from e
         except requests.exceptions.HTTPError as e:
-            logger.error(f"Embedding creation HTTP error: {e} (status {response.status_code})")
+            status = getattr(e.response, "status_code", getattr(response, "status_code", "unknown"))
+            logger.error(f"Embedding creation HTTP error: {e} (status {status})")
             raise EmbeddingError(f"Embedding creation HTTP error: {e}") from e
         except requests.exceptions.RequestException as e:
             logger.error(f"Embedding creation request error: {e}")
@@ -440,6 +447,18 @@ class OllamaAPIClient(BaseLLMClient):
             embeddings.append(embedding)
         
         return embeddings
+
+    @staticmethod
+    def _validate_chat_response(result: Dict[str, Any], model: str) -> None:
+        """Ensure chat responses contain textual assistant content."""
+        if not isinstance(result, dict):
+            raise LLMError(f"Chat completion returned non-object payload for model {model}")
+        message = result.get("message")
+        if not isinstance(message, dict):
+            raise LLMError(f"Chat completion missing 'message' block for model {model}")
+        content = message.get("content")
+        if not isinstance(content, str):
+            raise LLMError(f"Chat completion missing textual content for model {model}")
 
     def list_models(self) -> List[ModelInfo]:
         """List available models on the server.

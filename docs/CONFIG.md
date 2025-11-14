@@ -1,5 +1,7 @@
 # Configuration Guide
 
+> **Note:** The canonical, up-to-date environment variable reference now lives in [docs/CONFIGURATION.md](CONFIGURATION.md). This document remains for historical context and deeper parameter explanations.
+
 Comprehensive documentation of all Clockify RAG configuration options.
 
 ## Configuration Methods

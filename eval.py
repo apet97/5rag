@@ -227,7 +227,12 @@ def _resolve_relevant_indices(
     return relevant
 
 
-def evaluate(dataset_path="eval_datasets/clockify_v1.jsonl", verbose=False):
+def evaluate(
+    dataset_path="eval_datasets/clockify_v1.jsonl",
+    verbose=False,
+    llm_report=False,
+    llm_output=None,
+):
     """Run evaluation on dataset.
 
     Args:
@@ -256,6 +261,7 @@ def evaluate(dataset_path="eval_datasets/clockify_v1.jsonl", verbose=False):
         os.path.exists("chunks.jsonl")
     )
     faiss_available = os.path.exists("faiss.index")
+    faiss_index_path = "faiss.index" if faiss_available else None
 
     # Try to load the production hybrid index; fallback to lexical BM25 only if NO artifacts exist
     rag_available = False
@@ -283,7 +289,6 @@ def evaluate(dataset_path="eval_datasets/clockify_v1.jsonl", verbose=False):
                 sys.exit(1)
 
             retrieval_chunks, vecs_n, bm, hnsw = result
-            faiss_index_path = "faiss.index" if faiss_available else None
             retrieval_fn = lambda q: retrieve(q, retrieval_chunks, vecs_n, bm, top_k=TOP_K, hnsw=hnsw, faiss_index_path=faiss_index_path)[0]
             rag_available = True
             retrieval_mode = f"Hybrid (FAISS={'enabled' if faiss_available else 'disabled'})"
@@ -325,6 +330,10 @@ def evaluate(dataset_path="eval_datasets/clockify_v1.jsonl", verbose=False):
     ndcg_at_10_scores = []
 
     skipped = 0
+    llm_outputs: list[dict] = []
+    answer_once_fn = None
+    if llm_report and rag_available:
+        from clockify_rag.answer import answer_once as answer_once_fn
     for i, example in enumerate(dataset):
         query = example["query"]
         relevant_ids = _resolve_relevant_indices(example, id_map, title_section_map, title_map)
@@ -353,6 +362,25 @@ def evaluate(dataset_path="eval_datasets/clockify_v1.jsonl", verbose=False):
                 print(f"  NDCG@10:     {ndcg_at_10:.3f}")
                 print(f"  Retrieved idx: {retrieved_ids[:5]}")
                 print(f"  Relevant idx:  {sorted(relevant_ids)}")
+
+            if llm_report and answer_once_fn:
+                answer_payload = answer_once_fn(
+                    query,
+                    retrieval_chunks,
+                    vecs_n,
+                    bm,
+                    hnsw=hnsw,
+                    faiss_index_path=faiss_index_path,
+                )
+                llm_outputs.append(
+                    {
+                        "query": query,
+                        "answer": answer_payload["answer"],
+                        "confidence": answer_payload.get("confidence"),
+                        "refused": answer_payload.get("refused"),
+                        "metadata": answer_payload.get("metadata", {}),
+                    }
+                )
 
         except Exception as e:
             print(f"Error evaluating query '{query}': {e}")
@@ -436,6 +464,17 @@ def evaluate(dataset_path="eval_datasets/clockify_v1.jsonl", verbose=False):
     else:
         print("❌ NDCG@10 < 0.50: Needs improvement - ranking quality suboptimal")
 
+    if llm_report and rag_available and llm_outputs:
+        output_path = llm_output or os.path.join("eval_reports", "llm_answers.jsonl")
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as f:
+            for row in llm_outputs:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        results["llm_report_path"] = output_path
+        print(f"\n📝 Saved LLM answers to {output_path}")
+    elif llm_report and not rag_available:
+        print("⚠️  LLM report requested but hybrid index not available. Skipping answer generation.")
+
     return results
 
 
@@ -465,9 +504,24 @@ if __name__ == "__main__":
         default=SUCCESS_THRESHOLDS["ndcg_at_10"],
         help="Minimum acceptable NDCG@10 (default: %(default).2f)",
     )
+    parser.add_argument(
+        "--llm-report",
+        action="store_true",
+        help="Generate LLM answers for each query (uses answer_once and respects RAG_LLM_CLIENT)",
+    )
+    parser.add_argument(
+        "--llm-output",
+        default="eval_reports/llm_answers.jsonl",
+        help="Path to save LLM answer report when --llm-report is used",
+    )
     args = parser.parse_args()
 
-    results = evaluate(dataset_path=args.dataset, verbose=args.verbose)
+    results = evaluate(
+        dataset_path=args.dataset,
+        verbose=args.verbose,
+        llm_report=args.llm_report,
+        llm_output=args.llm_output,
+    )
 
     thresholds = {
         "mrr_at_10": args.min_mrr,

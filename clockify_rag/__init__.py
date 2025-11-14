@@ -19,6 +19,9 @@ from .exceptions import (
 
 # Configuration
 from .config import (
+    RAG_OLLAMA_URL,
+    RAG_CHAT_MODEL,
+    RAG_EMBED_MODEL,
     OLLAMA_URL,
     GEN_MODEL,
     EMB_MODEL,
@@ -30,7 +33,6 @@ from .config import (
 
 # Utility functions
 from .utils import (
-    check_ollama_connectivity,
     validate_ollama_url,
     validate_and_set_config,
     log_event,
@@ -64,8 +66,6 @@ from .indexing import (
 from .caching import (
     QueryCache,
     RateLimiter,
-    RateLimitError,
-    RateLimitSettings,
     get_query_cache,
     get_rate_limiter
 )
@@ -144,10 +144,11 @@ __all__ = [
     # Exceptions
     "EmbeddingError", "LLMError", "IndexLoadError", "BuildError",
     # Config
+    "RAG_OLLAMA_URL", "RAG_CHAT_MODEL", "RAG_EMBED_MODEL",
     "OLLAMA_URL", "GEN_MODEL", "EMB_MODEL", "CHUNK_CHARS",
     "DEFAULT_TOP_K", "DEFAULT_PACK_TOP", "REFUSAL_STR",
     # Utils
-    "check_ollama_connectivity", "validate_ollama_url", "validate_and_set_config",
+    "validate_ollama_url", "validate_and_set_config",
     "log_event", "compute_sha256",
     # Chunking
     "parse_articles", "build_chunks", "sliding_chunks",

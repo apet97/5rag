@@ -15,7 +15,11 @@ def is_ollama_available():
     import os
     try:
         import requests
-        ollama_url = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
+        ollama_url = (
+            os.environ.get("RAG_OLLAMA_URL")
+            or os.environ.get("OLLAMA_URL")
+            or "http://127.0.0.1:11434"
+        )
         response = requests.get(f"{ollama_url}/api/version", timeout=1)
         return response.ok
     except Exception:

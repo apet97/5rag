@@ -14,124 +14,22 @@ import logging
 import os
 import platform
 import signal
-import threading
 import time
 from datetime import datetime
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any
 
 import typer
-from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request, status
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, validator
-from fastapi.responses import JSONResponse, PlainTextResponse
 
 from . import config
 from .answer import answer_once
-from .caching import RateLimitError, get_rate_limiter
 from .cli import ensure_index_ready
 from .indexing import build
-from .logging_utils import log_query_event
-from .utils import check_ollama_connectivity
-from .exceptions import ValidationError, IndexLoadError
-from .metrics import get_metrics, set_gauge, MetricNames
+from .utils import validate_ollama_url
 
 logger = logging.getLogger(__name__)
-
-try:  # pragma: no cover - optional dependency when JWT auth disabled
-    import jwt
-except ModuleNotFoundError:  # pragma: no cover - dependency is optional
-    jwt = None
-
-
-async def validate_request_credentials(request: Request) -> Dict[str, Any]:
-    """Validate request credentials based on configured auth strategy."""
-
-    mode = (config.API_AUTH_MODE or "none").lower()
-    if mode in {"", "none"}:
-        return {"method": "none"}
-
-    if mode == "api_key":
-        if not config.API_ALLOWED_KEYS:
-            logger.error("API key authentication enabled but no keys loaded")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Authentication misconfigured",
-            )
-
-        header_name = config.API_KEY_HEADER or "x-api-key"
-        provided_key = request.headers.get(header_name)
-        if not provided_key:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Missing API key",
-            )
-
-        if provided_key not in config.API_ALLOWED_KEYS:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Invalid API key",
-            )
-
-        return {"method": "api_key", "principal": provided_key}
-
-    if mode == "jwt":
-        if not config.API_JWT_SECRET:
-            logger.error("JWT authentication enabled but secret not configured")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Authentication misconfigured",
-            )
-
-        auth_header = request.headers.get("Authorization")
-        if not auth_header:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Missing Authorization header",
-            )
-
-        scheme, _, token = auth_header.partition(" ")
-        if scheme.lower() != "bearer" or not token:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid Authorization header",
-            )
-
-        if jwt is None:
-            logger.error("JWT authentication requested but PyJWT is not installed")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="JWT authentication unavailable",
-            )
-
-        try:
-            decoded = jwt.decode(token, config.API_JWT_SECRET, algorithms=config.API_JWT_ALGORITHMS or None)
-        except Exception as exc:  # pragma: no cover - PyJWT supplies detailed errors
-            expired_error = getattr(jwt, "ExpiredSignatureError", tuple())
-            invalid_error = getattr(jwt, "InvalidTokenError", tuple())
-            if expired_error and isinstance(exc, expired_error):
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Token expired",
-                ) from exc
-            if invalid_error and isinstance(exc, invalid_error):
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="Invalid token",
-                ) from exc
-            logger.error("Unexpected JWT validation error: %s", exc)
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Authentication misconfigured",
-            ) from exc
-
-        return {"method": "jwt", "principal": decoded.get("sub"), "claims": decoded}
-
-    logger.error("Unsupported authentication mode: %s", config.API_AUTH_MODE)
-    raise HTTPException(
-        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        detail="Authentication misconfigured",
-    )
 
 # ============================================================================
 # Pydantic Models
@@ -188,12 +86,12 @@ class QueryResponse(BaseModel):
     question: str
     answer: str
     confidence: Optional[float] = None
-    sources: List[int | str] = Field(default_factory=list, description="Chunk IDs used")
-    metadata: Dict[str, Any] = Field(default_factory=dict, description="Additional metadata from answer pipeline")
-    routing: Optional[Dict[str, Any]] = Field(default=None, description="Routing recommendation metadata")
+    sources: list[int] = Field(default_factory=list, description="Chunk IDs used")
     timestamp: datetime
     processing_time_ms: float
     refused: bool = Field(False, description="True when the answer is a refusal/fallback")
+    metadata: Optional[Dict[str, Any]] = Field(None, description="Additional metadata (confidence routing, errors)")
+    routing: Optional[Dict[str, Any]] = Field(None, description="Routing recommendation (if available)")
     timing: Optional[Dict[str, Any]] = Field(None, description="Latency breakdown in milliseconds")
 
 
@@ -251,12 +149,11 @@ def create_app() -> FastAPI:
 
     # Add CORS middleware if enabled
     if config.ALPHA_HYBRID is not None:  # Placeholder check
-        origins = config.RAG_API_ALLOWED_ORIGINS
-        allow_credentials = "*" not in origins
+        origins = ["*"]
         app.add_middleware(
             CORSMiddleware,
             allow_origins=origins,
-            allow_credentials=allow_credentials,
+            allow_credentials=True,
             allow_methods=["*"],
             allow_headers=["*"],
         )
@@ -267,7 +164,6 @@ def create_app() -> FastAPI:
     app.state.bm = None
     app.state.hnsw = None
     app.state.index_ready = False
-    app.state.index_lock = threading.RLock()
 
     @app.on_event("startup")
     async def startup_event():
@@ -277,35 +173,16 @@ def create_app() -> FastAPI:
             result = ensure_index_ready(retries=2)
             if result:
                 chunks, vecs_n, bm, hnsw = result
-                with app.state.index_lock:
-                    app.state.chunks = chunks
-                    app.state.vecs_n = vecs_n
-                    app.state.bm = bm
-                    app.state.hnsw = hnsw
-                    app.state.index_ready = True
-                set_gauge(MetricNames.INDEX_SIZE, float(len(chunks)))
+                app.state.chunks = chunks
+                app.state.vecs_n = vecs_n
+                app.state.bm = bm
+                app.state.hnsw = hnsw
+                app.state.index_ready = True
                 logger.info(f"Index loaded: {len(chunks)} chunks")
             else:
                 logger.warning("Index not ready at startup")
-                set_gauge(MetricNames.INDEX_SIZE, 0.0)
-        except IndexLoadError as exc:
-            logger.error("Failed to load index at startup: %s", exc)
-            with app.state.index_lock:
-                app.state.chunks = None
-                app.state.vecs_n = None
-                app.state.bm = None
-                app.state.hnsw = None
-                app.state.index_ready = False
-            set_gauge(MetricNames.INDEX_SIZE, 0.0)
         except Exception as e:
             logger.error(f"Failed to load index at startup: {e}")
-            with app.state.index_lock:
-                app.state.chunks = None
-                app.state.vecs_n = None
-                app.state.bm = None
-                app.state.hnsw = None
-                app.state.index_ready = False
-            set_gauge(MetricNames.INDEX_SIZE, 0.0)
 
     @app.on_event("shutdown")
     async def shutdown_event():
@@ -320,13 +197,11 @@ def create_app() -> FastAPI:
         logger.info("Initiating graceful shutdown...")
 
         # Clear index from memory (helps with clean shutdown)
-        with app.state.index_lock:
-            app.state.chunks = None
-            app.state.vecs_n = None
-            app.state.bm = None
-            app.state.hnsw = None
-            app.state.index_ready = False
-        set_gauge(MetricNames.INDEX_SIZE, 0.0)
+        app.state.chunks = None
+        app.state.vecs_n = None
+        app.state.bm = None
+        app.state.hnsw = None
+        app.state.index_ready = False
 
         logger.info("Graceful shutdown complete")
 
@@ -351,16 +226,12 @@ def create_app() -> FastAPI:
         index_files_exist = all(
             Path(f).exists() for f in ["chunks.jsonl", "vecs_n.npy", "meta.jsonl", "bm25.json"]
         )
-        with app.state.index_lock:
-            index_ready = app.state.index_ready
-        index_ready = index_ready and index_files_exist
+        index_ready = app.state.index_ready and index_files_exist
 
         # Check Ollama connectivity with short timeout
         ollama_ok = False
         try:
-            await run_in_threadpool(
-                check_ollama_connectivity, config.OLLAMA_URL, timeout=2
-            )
+            validate_ollama_url(config.RAG_OLLAMA_URL, timeout=2)
             ollama_ok = True
         except Exception as e:
             # Ollama connectivity failure is acceptable for health check
@@ -397,9 +268,9 @@ def create_app() -> FastAPI:
     async def get_config() -> ConfigResponse:
         """Get current configuration."""
         return ConfigResponse(
-            ollama_url=config.OLLAMA_URL,
-            gen_model=config.GEN_MODEL,
-            emb_model=config.EMB_MODEL,
+            ollama_url=config.RAG_OLLAMA_URL,
+            gen_model=config.RAG_CHAT_MODEL,
+            emb_model=config.RAG_EMBED_MODEL,
             chunk_size=config.CHUNK_CHARS,
             top_k=config.DEFAULT_TOP_K,
             pack_top=config.DEFAULT_PACK_TOP,
@@ -411,11 +282,7 @@ def create_app() -> FastAPI:
     # ========================================================================
 
     @app.post("/v1/query", response_model=QueryResponse)
-    async def submit_query(
-        request: QueryRequest,
-        raw_request: Request,
-        credentials: Dict[str, Any] = Depends(validate_request_credentials),
-    ) -> QueryResponse:
+    async def submit_query(request: QueryRequest) -> QueryResponse:
         """Submit a question and get an answer.
 
         This endpoint uses the RAG system to retrieve relevant context
@@ -430,82 +297,43 @@ def create_app() -> FastAPI:
         Raises:
             HTTPException: If index not ready or query fails
         """
-        with app.state.index_lock:
-            index_ready = app.state.index_ready
-            chunks = app.state.chunks
-            vecs_n = app.state.vecs_n
-            bm = app.state.bm
-            hnsw = app.state.hnsw
-
-        if not index_ready:
+        if not app.state.index_ready:
             raise HTTPException(
                 status_code=503, detail="Index not ready. Run /v1/ingest first or wait for startup."
             )
 
-        limiter = get_rate_limiter()
-        principal = credentials.get("principal") if isinstance(credentials, dict) else None
-        client_host = raw_request.client.host if raw_request.client else None
-        limiter_identity = principal or client_host or "api-anonymous"
-
-        try:
-            allowed = limiter.allow_request(limiter_identity)
-        except RateLimitError as exc:
-            logger.warning("Rate limiter unavailable (%s). Allowing request.", exc)
-            allowed = True
-
-        if not allowed:
-            try:
-                wait_seconds = limiter.wait_time(limiter_identity)
-            except RateLimitError as exc:
-                logger.warning("Rate limiter wait_time failed (%s). Defaulting to 0s retry.", exc)
-                wait_seconds = 0.0
-            detail = f"Rate limit exceeded. Retry after {wait_seconds:.0f} seconds."
-            raise HTTPException(status_code=429, detail=detail)
-
         try:
             start_time = time.time()
 
-            result = await run_in_threadpool(
-                answer_once,
+            result = answer_once(
                 request.question,
-                chunks,
-                vecs_n,
-                bm,
+                app.state.chunks,
+                app.state.vecs_n,
+                app.state.bm,
                 top_k=request.top_k,
                 pack_top=request.pack_top,
                 threshold=request.threshold,
-                hnsw=hnsw,
+                hnsw=app.state.hnsw,
             )
 
             elapsed_ms = (time.time() - start_time) * 1000
 
-            log_query_event(
-                request.question,
-                result,
-                chunks,
-                elapsed_ms,
-                channel="api.v1.query",
-                disabled=config.API_PRIVACY_MODE,
-            )
-
-            sources = result.get("selected_chunk_ids") or result.get("selected_chunks", [])
+            metadata = result.get("metadata", {})
+            selected_chunks = result.get("selected_chunks", [])
 
             return QueryResponse(
                 question=request.question,
-                answer=result.get("answer", ""),
+                answer=result["answer"],
                 confidence=result.get("confidence"),
-                sources=sources[:5],  # Top 5 sources
-                metadata=result.get("metadata", {}) or {},
-                routing=result.get("routing"),
+                sources=selected_chunks[:5],
                 timestamp=datetime.now(),
                 processing_time_ms=elapsed_ms,
                 refused=result.get("refused", False),
+                metadata=metadata or {},
+                routing=result.get("routing"),
                 timing=result.get("timing"),
             )
 
-        except ValidationError as exc:
-            logger.info("Validation error: %s", exc)
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as e:
             logger.error(f"Query error: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"Query processing failed: {str(e)}")
@@ -514,139 +342,65 @@ def create_app() -> FastAPI:
     # Ingest Endpoint
     # ========================================================================
 
-    secure_ingest_modes = {"api_key", "jwt"}
-    auth_mode = (config.API_AUTH_MODE or "none").strip().lower()
+    @app.post("/v1/ingest", response_model=IngestResponse)
+    async def trigger_ingest(
+        request: IngestRequest, background_tasks: BackgroundTasks
+    ) -> IngestResponse:
+        """Trigger index build/rebuild.
 
-    if auth_mode in secure_ingest_modes:
+        Starts a background task to build the index from the knowledge base.
 
-        @app.post("/v1/ingest", response_model=IngestResponse)
-        async def trigger_ingest(
-            request: IngestRequest,
-            background_tasks: BackgroundTasks,
-            _: Dict[str, Any] = Depends(validate_request_credentials),
-        ) -> IngestResponse:
-            """Trigger index build/rebuild.
+        Args:
+            request: IngestRequest with input file and options
+            background_tasks: FastAPI background tasks
 
-            Starts a background task to build the index from the knowledge base.
+        Returns:
+            IngestResponse with status
 
-            Args:
-                request: IngestRequest with input file and options
-                background_tasks: FastAPI background tasks
+        Note:
+            Build happens asynchronously. Check /health to verify completion.
+        """
+        input_file = request.input_file or "knowledge_full.md"
 
-            Returns:
-                IngestResponse with status
+        if not os.path.exists(input_file):
+            raise HTTPException(status_code=404, detail=f"Input file not found: {input_file}")
 
-            Note:
-                Build happens asynchronously. Check /health to verify completion.
-            """
-            input_file = request.input_file or "knowledge_full.md"
+        def do_ingest():
+            """Background task to build index."""
+            try:
+                logger.info(f"Starting ingest from {input_file}")
+                build(input_file, retries=2)
+                app.state.index_ready = True
+                logger.info("Ingest completed successfully")
+            except Exception as e:
+                logger.error(f"Ingest failed: {e}", exc_info=True)
+                app.state.index_ready = False
 
-            if not os.path.exists(input_file):
-                raise HTTPException(status_code=404, detail=f"Input file not found: {input_file}")
+        background_tasks.add_task(do_ingest)
 
-            def do_ingest():
-                """Background task to build index."""
-                try:
-                    logger.info(f"Starting ingest from {input_file}")
-                    build(input_file, retries=2)
-
-                    result = ensure_index_ready(retries=2)
-                    if not result:
-                        raise RuntimeError("Index artifacts missing after build")
-
-                    chunks, vecs_n, bm, hnsw = result
-                    with app.state.index_lock:
-                        app.state.chunks = chunks
-                        app.state.vecs_n = vecs_n
-                        app.state.bm = bm
-                        app.state.hnsw = hnsw
-                        app.state.index_ready = True
-                    set_gauge(MetricNames.INDEX_SIZE, float(len(chunks)))
-                    logger.info("Ingest completed successfully")
-                except IndexLoadError as exc:
-                    logger.error("Ingest failed to load index: %s", exc)
-                    with app.state.index_lock:
-                        app.state.chunks = None
-                        app.state.vecs_n = None
-                        app.state.bm = None
-                        app.state.hnsw = None
-                        app.state.index_ready = False
-                    set_gauge(MetricNames.INDEX_SIZE, 0.0)
-                except Exception as e:
-                    logger.error(f"Ingest failed: {e}", exc_info=True)
-                    with app.state.index_lock:
-                        app.state.chunks = None
-                        app.state.vecs_n = None
-                        app.state.bm = None
-                        app.state.hnsw = None
-                        app.state.index_ready = False
-                    set_gauge(MetricNames.INDEX_SIZE, 0.0)
-
-            background_tasks.add_task(do_ingest)
-
-            with app.state.index_lock:
-                index_ready = app.state.index_ready
-
-            return IngestResponse(
-                status="processing",
-                message=f"Index build started in background from {input_file}",
-                timestamp=datetime.now(),
-                index_ready=index_ready,
-            )
-
-    else:
-        logger.warning(
-            "Disabling /v1/ingest: secure auth mode required (set RAG_AUTH_MODE to 'api_key' or 'jwt')."
+        return IngestResponse(
+            status="processing",
+            message=f"Index build started in background from {input_file}",
+            timestamp=datetime.now(),
+            index_ready=app.state.index_ready,
         )
 
-        @app.post("/v1/ingest", response_model=IngestResponse)
-        async def ingest_disabled(
-            _request: IngestRequest,
-            _background_tasks: BackgroundTasks,
-        ) -> IngestResponse:
-            """Reject ingest attempts when API auth is not enforced."""
-
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Ingest disabled until RAG_AUTH_MODE is set to 'api_key' or 'jwt'",
-            )
-
     # ========================================================================
-    # Metrics Endpoint
+    # Metrics Endpoint (Placeholder)
     # ========================================================================
 
     @app.get("/v1/metrics")
-    async def get_metrics_endpoint(
-        _: Dict[str, Any] = Depends(validate_request_credentials),
-        format: str = Query("json", alias="format"),
-        include_histograms: bool = Query(
-            False, description="Include raw histogram observations in JSON output"
-        ),
-    ) -> Any:
-        """Expose collected system metrics in multiple formats."""
+    async def get_metrics() -> Dict[str, Any]:
+        """Get system metrics (placeholder for Prometheus integration).
 
-        collector = get_metrics()
-        fmt = (format or "json").lower()
-
-        with app.state.index_lock:
-            chunk_count = len(app.state.chunks) if app.state.chunks else 0
-            index_ready = app.state.index_ready
-
-        set_gauge(MetricNames.INDEX_SIZE, float(chunk_count))
-
-        if fmt in {"prometheus", "text"}:
-            prom = collector.export_prometheus()
-            return PlainTextResponse(prom, media_type="text/plain")
-
-        if fmt == "csv":
-            csv_data = collector.export_csv()
-            return PlainTextResponse(csv_data, media_type="text/csv")
-
-        data = json.loads(collector.export_json(include_histograms=include_histograms))
-        data["index_ready"] = index_ready
-        data["chunks_loaded"] = chunk_count
-
-        return JSONResponse(content=data)
+        Returns:
+            Dictionary with metrics (JSON for easy parsing)
+        """
+        return {
+            "timestamp": datetime.now().isoformat(),
+            "index_ready": app.state.index_ready,
+            "chunks_loaded": len(app.state.chunks) if app.state.chunks else 0,
+        }
 
     return app
 

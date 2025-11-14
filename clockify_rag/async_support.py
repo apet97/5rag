@@ -23,13 +23,11 @@ import logging
 import time
 from typing import Dict, List, Tuple, Optional, Any
 
-import aiohttp
 import numpy as np
 
 from .config import (
-    OLLAMA_URL,
-    GEN_MODEL,
-    EMB_MODEL,
+    RAG_CHAT_MODEL,
+    RAG_EMBED_MODEL,
     EMB_CONNECT_T,
     EMB_READ_T,
     CHAT_CONNECT_T,
@@ -43,85 +41,33 @@ from .config import (
     DEFAULT_RETRIES,
     REFUSAL_STR,
 )
-from .exceptions import LLMError
+from .exceptions import LLMError, LLMUnavailableError
 from .confidence_routing import get_routing_action
+from .api_client import get_llm_client, ChatMessage, ChatCompletionOptions
 
 logger = logging.getLogger(__name__)
 
 
-async def async_http_post_with_retries(
-    session: aiohttp.ClientSession,
-    url: str,
-    json_payload: dict,
-    retries: int = 3,
-    timeout: Optional[aiohttp.ClientTimeout] = None
-) -> dict:
-    """Async POST with exponential backoff retry.
-
-    Args:
-        session: aiohttp ClientSession
-        url: Target URL
-        json_payload: JSON payload to POST
-        retries: Number of retries
-        timeout: Request timeout
-
-    Returns:
-        JSON response
-
-    Raises:
-        aiohttp.ClientError: If request fails after all retries
-    """
-    if timeout is None:
-        timeout = aiohttp.ClientTimeout(
-            connect=EMB_CONNECT_T,
-            total=EMB_READ_T + EMB_CONNECT_T
-        )
-
-    last_error = None
-    for attempt in range(retries + 1):
-        try:
-            async with session.post(url, json=json_payload, timeout=timeout) as response:
-                response.raise_for_status()
-                return await response.json()
-        except aiohttp.ClientError as e:
-            last_error = e
-            if attempt < retries:
-                backoff = 0.5 * (2 ** attempt)  # Exponential backoff
-                logger.debug(f"HTTP POST failed (attempt {attempt + 1}/{retries + 1}), retrying in {backoff}s: {e}")
-                await asyncio.sleep(backoff)
-            else:
-                logger.error(f"HTTP POST to {url} failed after {retries + 1} attempts: {e}")
-
-    raise aiohttp.ClientError(f"HTTP POST to {url} failed after {retries + 1} attempts: {last_error}")
-
-
-async def async_embed_query(session: aiohttp.ClientSession, text: str, retries: int = 0) -> np.ndarray:
+async def async_embed_query(text: str, retries: int = 0) -> np.ndarray:
     """Async version of embed_query.
 
     Args:
-        session: aiohttp ClientSession
         text: Text to embed
         retries: Number of retries
 
     Returns:
         Normalized embedding vector (numpy array)
     """
-    payload = {"model": EMB_MODEL, "prompt": text}
-    timeout = aiohttp.ClientTimeout(
-        connect=EMB_CONNECT_T,
-        total=EMB_READ_T + EMB_CONNECT_T
-    )
-
+    client = get_llm_client()
     try:
-        result = await async_http_post_with_retries(
-            session,
-            f"{OLLAMA_URL}/api/embeddings",
-            payload,
-            retries=retries,
-            timeout=timeout
+        vector: List[float] = await asyncio.to_thread(
+            client.create_embedding,
+            text,
+            RAG_EMBED_MODEL,
+            (EMB_CONNECT_T, EMB_READ_T),
+            retries,
         )
-        embedding = np.array(result["embedding"], dtype=np.float32)
-        # Normalize
+        embedding = np.array(vector, dtype=np.float32)
         norm = np.linalg.norm(embedding)
         if norm > 0:
             embedding = embedding / norm
@@ -132,7 +78,6 @@ async def async_embed_query(session: aiohttp.ClientSession, text: str, retries: 
 
 
 async def async_ask_llm(
-    session: aiohttp.ClientSession,
     question: str,
     context_block: str,
     seed: int = DEFAULT_SEED,
@@ -143,7 +88,6 @@ async def async_ask_llm(
     """Async version of ask_llm.
 
     Args:
-        session: aiohttp ClientSession
         question: User question
         context_block: Context snippets
         seed, num_ctx, num_predict, retries: LLM parameters
@@ -156,39 +100,36 @@ async def async_ask_llm(
     system_prompt = get_system_prompt()
     user_prompt = USER_WRAPPER.format(snips=context_block, q=question)
 
-    payload = {
-        "model": GEN_MODEL,
-        "prompt": user_prompt,
-        "system": system_prompt,
-        "options": {
-            "seed": seed,
-            "num_ctx": num_ctx,
-            "num_predict": num_predict,
-        },
-        "stream": False,
+    client = get_llm_client()
+    messages: List[ChatMessage] = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+    options: ChatCompletionOptions = {
+        "seed": seed,
+        "num_ctx": num_ctx,
+        "num_predict": num_predict,
     }
 
-    timeout = aiohttp.ClientTimeout(
-        connect=CHAT_CONNECT_T,
-        total=CHAT_READ_T + CHAT_CONNECT_T
-    )
-
     try:
-        result = await async_http_post_with_retries(
-            session,
-            f"{OLLAMA_URL}/api/generate",
-            payload,
-            retries=retries,
-            timeout=timeout
+        result = await asyncio.to_thread(
+            client.chat_completion,
+            messages,
+            RAG_CHAT_MODEL,
+            options,
+            False,
+            (CHAT_CONNECT_T, CHAT_READ_T),
+            retries,
         )
-        return result.get("response", "")
+        return result.get("message", {}).get("content", "")
+    except LLMUnavailableError:
+        raise
     except Exception as e:
         logger.error(f"LLM call failed: {e}")
         raise LLMError(f"LLM generation failed: {e}") from e
 
 
 async def async_generate_llm_answer(
-    session: aiohttp.ClientSession,
     question: str,
     context_block: str,
     seed: int = DEFAULT_SEED,
@@ -200,7 +141,6 @@ async def async_generate_llm_answer(
     """Async version of generate_llm_answer with confidence scoring and citation validation.
 
     Args:
-        session: aiohttp ClientSession
         question: User question
         context_block: Packed context snippets
         seed, num_ctx, num_predict, retries: LLM parameters
@@ -213,7 +153,14 @@ async def async_generate_llm_answer(
     from .config import STRICT_CITATIONS
 
     t0 = time.time()
-    raw_response = (await async_ask_llm(session, question, context_block, seed, num_ctx, num_predict, retries)).strip()
+    raw_response = (await async_ask_llm(
+        question,
+        context_block,
+        seed,
+        num_ctx,
+        num_predict,
+        retries,
+    )).strip()
     timing = time.time() - t0
 
     # Parse JSON response with confidence
@@ -320,98 +267,76 @@ async def async_answer_once(
 
     t_start = time.time()
 
-    # Create aiohttp session for async HTTP calls
-    async with aiohttp.ClientSession() as session:
-        # Retrieve (synchronous for now, retrieval is fast)
-        t0 = time.time()
-        from .retrieval import retrieve
-        selected, scores = retrieve(
-            question, chunks, vecs_n, bm,
-            top_k=top_k, hnsw=hnsw, retries=retries,
-            faiss_index_path=faiss_index_path
-        )
-        retrieve_time = time.time() - t0
+    # Retrieve (synchronous for now, retrieval is fast)
+    t0 = time.time()
+    from .retrieval import retrieve
+    selected, scores = retrieve(
+        question, chunks, vecs_n, bm,
+        top_k=top_k, hnsw=hnsw, retries=retries,
+        faiss_index_path=faiss_index_path
+    )
+    retrieve_time = time.time() - t0
 
-        # Check coverage
-        if not coverage_ok(selected, scores["dense"], threshold):
-            return {
-                "answer": REFUSAL_STR,
-                "refused": True,
-                "confidence": None,
-                "selected_chunks": [],
-                "selected_chunk_ids": [],
-                "packed_chunks": [],
-                "packed_chunk_ids": [],
-                "context_block": "",
-                "timing": {
-                    "total_ms": (time.time() - t_start) * 1000,
-                    "retrieve_ms": retrieve_time * 1000,
-                    "mmr_ms": 0,
-                    "rerank_ms": 0,
-                    "llm_ms": 0,
-                },
-                "metadata": {
-                    "retrieval_count": len(selected),
-                    "coverage_check": "failed"
-                },
-                "routing": get_routing_action(None, refused=True, critical=False)
-            }
-
-        # Apply MMR diversification
-        t0 = time.time()
-        mmr_selected = apply_mmr_diversification(selected, scores, vecs_n, pack_top)
-        mmr_time = time.time() - t0
-
-        # Reranking (synchronous for now)
-        rerank_time = 0.0
-        rerank_applied = False
-        rerank_reason = "disabled"
-        if use_rerank:
-        from .answer import apply_reranking
-            t0 = time.time()
-            mmr_selected, rerank_scores, rerank_applied, rerank_reason, rerank_time = apply_reranking(
-                question, chunks, mmr_selected, scores, use_rerank,
-                seed=seed, num_ctx=num_ctx, num_predict=num_predict, retries=retries
-            )
-
-        # Pack snippets
-        context_block, packed_ids, used_tokens = pack_snippets(
-            chunks, mmr_selected, pack_top=pack_top, num_ctx=num_ctx
-        )
-
-        # Generate answer (async)
-        answer, llm_time, confidence = await async_generate_llm_answer(
-            session, question, context_block,
-            seed=seed, num_ctx=num_ctx, num_predict=num_predict,
-            retries=retries, packed_ids=packed_ids
-        )
-
-        from .answer import _resolve_chunk_ids as _resolve_chunk_ids_sync
-
-        selected_chunk_ids = _resolve_chunk_ids_sync(chunks, selected)
-        packed_chunk_ids = list(packed_ids or [])
-
-        total_time = time.time() - t_start
-
-        # Confidence-based routing
-        refused = (answer == REFUSAL_STR)
-        routing = get_routing_action(confidence, refused=refused, critical=False)
-
+    # Check coverage
+    if not coverage_ok(selected, scores["dense"], threshold):
         return {
-            "answer": answer,
-            "refused": refused,
-            "confidence": confidence,
+            "answer": REFUSAL_STR,
+            "refused": True,
+            "confidence": None,
+            "selected_chunks": [],
+            "packed_chunks": [],
+            "context_block": "",
+            "timing": {
+                "total_ms": (time.time() - t_start) * 1000,
+                "retrieve_ms": retrieve_time * 1000,
+                "mmr_ms": 0,
+                "rerank_ms": 0,
+                "llm_ms": 0,
+            },
+            "metadata": {
+                "retrieval_count": len(selected),
+                "coverage_check": "failed"
+            },
+            "routing": get_routing_action(None, refused=True, critical=False)
+        }
+
+    # Apply MMR diversification
+    t0 = time.time()
+    mmr_selected = apply_mmr_diversification(selected, scores, vecs_n, pack_top)
+    mmr_time = time.time() - t0
+
+    # Reranking (synchronous for now)
+    rerank_time = 0.0
+    rerank_applied = False
+    rerank_reason = "disabled"
+    if use_rerank:
+        from .answer import apply_reranking
+        t0 = time.time()
+        mmr_selected, rerank_scores, rerank_applied, rerank_reason, rerank_time = apply_reranking(
+            question, chunks, mmr_selected, scores, use_rerank,
+            seed=seed, num_ctx=num_ctx, num_predict=num_predict, retries=retries
+        )
+
+    # Pack snippets
+    context_block, packed_ids, used_tokens = pack_snippets(
+        chunks, mmr_selected, pack_top=pack_top, num_ctx=num_ctx
+    )
+
+    def _failure(reason: str, error: Exception) -> Dict[str, Any]:
+        total_time = time.time() - t_start
+        return {
+            "answer": REFUSAL_STR,
+            "refused": True,
+            "confidence": None,
             "selected_chunks": selected,
-            "selected_chunk_ids": selected_chunk_ids,
             "packed_chunks": mmr_selected,
-            "packed_chunk_ids": packed_chunk_ids,
             "context_block": context_block,
             "timing": {
                 "total_ms": total_time * 1000,
                 "retrieve_ms": retrieve_time * 1000,
                 "mmr_ms": mmr_time * 1000,
                 "rerank_ms": rerank_time * 1000,
-                "llm_ms": llm_time * 1000,
+                "llm_ms": 0,
             },
             "metadata": {
                 "retrieval_count": len(selected),
@@ -419,13 +344,58 @@ async def async_answer_once(
                 "used_tokens": used_tokens,
                 "rerank_applied": rerank_applied,
                 "rerank_reason": rerank_reason,
+                "llm_error": reason,
+                "llm_error_msg": str(error),
             },
-            "routing": routing
+            "routing": get_routing_action(None, refused=True, critical=True),
         }
+
+    # Generate answer (async)
+    try:
+        answer, llm_time, confidence = await async_generate_llm_answer(
+            question, context_block,
+            seed=seed, num_ctx=num_ctx, num_predict=num_predict,
+            retries=retries, packed_ids=packed_ids
+        )
+    except LLMUnavailableError as exc:
+        logger.error(f"LLM unavailable during async answer generation: {exc}")
+        return _failure("llm_unavailable", exc)
+    except LLMError as exc:
+        logger.error(f"LLM error during async answer generation: {exc}")
+        return _failure("llm_error", exc)
+
+    total_time = time.time() - t_start
+
+    # Confidence-based routing
+    refused = (answer == REFUSAL_STR)
+    routing = get_routing_action(confidence, refused=refused, critical=False)
+
+    return {
+        "answer": answer,
+        "refused": refused,
+        "confidence": confidence,
+        "selected_chunks": selected,
+        "packed_chunks": mmr_selected,
+        "context_block": context_block,
+        "timing": {
+                "total_ms": total_time * 1000,
+                "retrieve_ms": retrieve_time * 1000,
+                "mmr_ms": mmr_time * 1000,
+                "rerank_ms": rerank_time * 1000,
+                "llm_ms": llm_time * 1000,
+        },
+        "metadata": {
+            "retrieval_count": len(selected),
+            "packed_count": len(packed_ids),
+            "used_tokens": used_tokens,
+            "rerank_applied": rerank_applied,
+            "rerank_reason": rerank_reason,
+        },
+        "routing": routing
+    }
 
 
 __all__ = [
-    "async_http_post_with_retries",
     "async_embed_query",
     "async_ask_llm",
     "async_generate_llm_answer",

@@ -1,95 +1,69 @@
-# Multi-architecture Dockerfile for Clockify RAG
-# Supports: linux/amd64, linux/arm64 (Apple Silicon via Docker Desktop)
-#
-# Build with:
-#   docker build -t clockify-rag:latest .
-#
-# Build for multiple architectures:
-#   docker buildx build --platform linux/amd64,linux/arm64 -t clockify-rag:latest .
+# Multi-stage build to keep the runtime image small and reproducible
+FROM python:3.11-slim AS builder
 
-# Stage 1: Builder
-FROM python:3.11-slim as builder
-
-# Set environment variables
 ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1
 
-WORKDIR /app
-
-# Install build dependencies
+# Build-time system dependencies for numpy/torch/faiss wheels
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
-    git \
+    gfortran \
+    libopenblas-dev \
+    liblapack-dev \
+    libblas-dev \
+    pkg-config \
     curl \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install uv (fast dependency manager)
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Copy dependency files (layer caching optimization)
-COPY pyproject.toml pyproject.toml
-COPY README.md README.md
-COPY clockify_rag/__init__.py clockify_rag/__init__.py
-
-# Install Python dependencies (production only, no dev extras)
-RUN /root/.cargo/bin/uv pip install --python /usr/local/bin/python3.11 \
-    --target /app/venv \
-    --compile-bytecode \
-    .
-# Note: Using '.' instead of '-e .' to avoid dev dependencies
-# This installs only the dependencies listed in pyproject.toml [project.dependencies]
-
-# Stage 2: Runtime
-FROM python:3.11-slim
-
-# Set environment variables
-ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PATH="/app/venv/bin:$PATH"
-
-# Install runtime dependencies only
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Copy venv from builder
-COPY --from=builder /app/venv /app/venv
+# Copy project files (pyproject is the source of truth for deps)
+COPY . .
 
-# Create non-root user for security
-RUN groupadd -r raguser && useradd -r -g raguser raguser
+# Install the package and runtime dependencies
+RUN pip install --upgrade pip && \
+    pip install --no-cache-dir .
 
-# Copy application code
-COPY --chown=raguser:raguser . .
+# -----------------------------------------------------------------------------
+# Runtime image
+# -----------------------------------------------------------------------------
+FROM python:3.11-slim
 
-# Create necessary directories with proper permissions
-RUN mkdir -p var/{index,logs,reports,backups} /app/.cache && \
-    chown -R raguser:raguser var /app/.cache && \
-    chmod 755 var /app/.cache && \
-    chmod 755 var/{index,logs,reports,backups}
+ENV PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# Switch to non-root user
-USER raguser
+# Runtime libraries required by faiss / numpy
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgomp1 \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
 
-# Ensure writable directories exist and have correct permissions
-RUN touch /app/var/logs/.keep && \
-    touch /app/var/index/.keep
+WORKDIR /app
 
-# Health check
+# Copy installed site-packages (includes console scripts)
+COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
+COPY --from=builder /usr/local/bin /usr/local/bin
+
+# Copy application sources (data, scripts, docs)
+COPY --from=builder /app /app
+
+# Create directories for runtime artifacts
+RUN mkdir -p /app/data /app/logs
+
+# Non-root user for safety
+RUN useradd --create-home --shell /bin/bash app && chown -R app:app /app
+USER app
+
+# Default configuration aligns with clockify_rag.config
+ENV RAG_OLLAMA_URL=http://host.docker.internal:11434 \
+    OLLAMA_URL=http://host.docker.internal:11434 \
+    RAG_LOG_FILE=/app/logs/rag_queries.jsonl
+
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health').read()" || exit 1
+    CMD python -c "from clockify_rag.error_handlers import print_system_health; print_system_health()" > /dev/null || exit 1
 
-# Expose port for API server
 EXPOSE 8000
 
-# Default command: run API server with graceful shutdown (30s timeout)
-CMD ["python", "-m", "uvicorn", "clockify_rag.api:app", "--host", "0.0.0.0", "--port", "8000", "--timeout-graceful-shutdown", "30"]
-
-# Alternative commands:
-# - Interactive CLI: docker run -it clockify-rag:latest python -m clockify_rag.cli_modern chat
-# - Build index: docker run -v $(pwd)/knowledge_full.md:/app/knowledge_full.md clockify-rag:latest python -m clockify_rag.cli_modern ingest
-# - Single query: docker run clockify-rag:latest python -m clockify_rag.cli_modern query "Your question"
+# Default to serving the FastAPI application (override for CLI usage)
+CMD ["uvicorn", "clockify_rag.api:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -21,8 +21,6 @@ from collections import Counter
 from typing import Any, Optional, Dict, List, Tuple
 
 import numpy as np
-import requests
-
 import clockify_rag.config as config
 from .embedding import embed_query as _embedding_embed_query
 from .exceptions import LLMError, ValidationError
@@ -30,6 +28,7 @@ from .http_utils import get_session
 from .indexing import bm25_scores, get_faiss_index
 from .utils import tokenize  # FIX (Error #17): Import tokenize from utils instead of duplicating
 from .intent_classification import classify_intent, get_intent_metadata, adjust_scores_by_intent
+from .api_client import ChatMessage, ChatCompletionOptions
 
 logger = logging.getLogger(__name__)
 
@@ -155,16 +154,18 @@ def reset_query_expansion_cache():
 
 
 def _resolve_query_expansion_path():
+    import clockify_rag.config as config
     if _query_expansion_override is not None:
         return _query_expansion_override
-    env_path = os.environ.get(QUERY_EXPANSIONS_ENV_VAR)
+    env_path = getattr(config, 'CLOCKIFY_QUERY_EXPANSIONS', None)
     if env_path:
         return pathlib.Path(env_path)
     return _DEFAULT_QUERY_EXPANSION_PATH
 
 
 def _read_query_expansion_file(path):
-    MAX_EXPANSION_FILE_SIZE = int(os.environ.get("MAX_QUERY_EXPANSION_FILE_SIZE", str(10 * 1024 * 1024)))
+    import clockify_rag.config as config
+    MAX_EXPANSION_FILE_SIZE = config.MAX_QUERY_EXPANSION_FILE_SIZE
     try:
         file_size = os.path.getsize(path)
         if file_size > MAX_EXPANSION_FILE_SIZE:
@@ -241,7 +242,7 @@ def count_tokens(text: str, model: str = None) -> int:
 
     Args:
         text: Text to count tokens for
-        model: Model name (defaults to config.GEN_MODEL)
+        model: Model name (defaults to config.RAG_CHAT_MODEL)
 
     Returns:
         Estimated token count
@@ -249,7 +250,7 @@ def count_tokens(text: str, model: str = None) -> int:
     from . import config
 
     if model is None:
-        model = config.GEN_MODEL
+        model = config.RAG_CHAT_MODEL
 
     # Try tiktoken for GPT models
     if "gpt" in model.lower():
@@ -650,7 +651,7 @@ def rerank_with_llm(
     num_predict: Optional[int] = None,
     retries: Optional[int] = None,
 ) -> Tuple:
-    """Optional: rerank MMR-selected passages with LLM.
+    """Optional: rerank MMR-selected passages with LLM using API client.
 
     Returns: (order, scores, rerank_applied, rerank_reason)
     """
@@ -671,34 +672,32 @@ def rerank_with_llm(
     if retries is None:
         retries = config.DEFAULT_RETRIES
 
-    payload = {
-        "model": config.GEN_MODEL,
-        "options": {
-            "temperature": 0,
-            "seed": seed,
-            "num_ctx": num_ctx,
-            "num_predict": num_predict,
-            "top_p": 0.9,
-            "top_k": 40,
-            "repeat_penalty": 1.05
-        },
-        "messages": [
-            {"role": "user", "content": RERANK_PROMPT.format(q=question, passages=passages_text)}
-        ],
-        "stream": False
+    from .api_client import chat_completion, ChatMessage, ChatCompletionOptions
+    
+    messages: List[ChatMessage] = [
+        {"role": "user", "content": RERANK_PROMPT.format(q=question, passages=passages_text)}
+    ]
+    
+    options: ChatCompletionOptions = {
+        "temperature": 0,
+        "seed": seed,
+        "num_ctx": num_ctx,
+        "num_predict": num_predict,
+        "top_p": 0.9,
+        "top_k": 40,
+        "repeat_penalty": 1.05
     }
 
     rerank_scores = {}
-    sess = get_session(retries=retries)
     try:
-        r = sess.post(
-            f"{config.OLLAMA_URL}/api/chat",
-            json=payload,
+        response = chat_completion(
+            messages=messages,
+            model=config.RAG_CHAT_MODEL,
+            options=options,
             timeout=(config.CHAT_CONNECT_T, config.RERANK_READ_T),
-            allow_redirects=False
+            retries=retries
         )
-        r.raise_for_status()
-        resp = r.json()
+        resp = response
         msg = (resp.get("message") or {}).get("content", "").strip()
 
         if not msg:
@@ -731,18 +730,18 @@ def rerank_with_llm(
         except json.JSONDecodeError:
             logger.debug("info: rerank=fallback reason=json")
             return selected, rerank_scores, False, "json"
-    except requests.exceptions.Timeout:
-        logger.debug("info: rerank=fallback reason=timeout")
-        return selected, rerank_scores, False, "timeout"
-    except requests.exceptions.ConnectionError:
-        logger.debug("info: rerank=fallback reason=conn")
-        return selected, rerank_scores, False, "conn"
-    except requests.exceptions.HTTPError:
-        logger.debug(f"info: rerank=fallback reason=http")
-        return selected, rerank_scores, False, "http"
-    except requests.exceptions.RequestException as e:
-        logger.debug(f"info: rerank=fallback reason=http error_type={type(e).__name__}")
-        return selected, rerank_scores, False, "http"
+    except LLMError as e:
+        # Handle LLM-specific errors from the API client
+        error_type = type(e).__name__
+        if "timeout" in str(e).lower():
+            logger.debug("info: rerank=fallback reason=timeout")
+            return selected, rerank_scores, False, "timeout"
+        elif "connection" in str(e).lower():
+            logger.debug("info: rerank=fallback reason=conn")
+            return selected, rerank_scores, False, "conn"
+        else:
+            logger.debug(f"info: rerank=fallback reason=http error_type={error_type}")
+            return selected, rerank_scores, False, "http"
     except (json.JSONDecodeError, KeyError, IndexError) as e:
         # FIX (Error #8): More specific exception handling for expected errors
         logger.debug(f"info: rerank=fallback reason=error error_type={type(e).__name__}")
@@ -855,7 +854,7 @@ def ask_llm(
     num_predict: Optional[int] = None,
     retries: Optional[int] = None,
 ) -> str:
-    """Call Ollama chat with Qwen best-practice options."""
+    """Call Ollama chat with Qwen best-practice options using the API client."""
     if seed is None:
         seed = config.DEFAULT_SEED
     if num_ctx is None:
@@ -865,44 +864,40 @@ def ask_llm(
     if retries is None:
         retries = config.DEFAULT_RETRIES
 
-    payload = {
-        "model": config.GEN_MODEL,
-        "options": {
-            "temperature": 0,
-            "seed": seed,
-            "num_ctx": num_ctx,
-            "num_predict": num_predict,
-            "top_p": 0.9,
-            "top_k": 40,
-            "repeat_penalty": 1.05
-        },
-        "messages": [
-            {"role": "system", "content": get_system_prompt()},
-            {"role": "user", "content": USER_WRAPPER.format(snips=snippets_block, q=question)}
-        ],
-        "stream": False
+    from .api_client import chat_completion, ChatMessage, ChatCompletionOptions
+    
+    messages: List[ChatMessage] = [
+        {"role": "system", "content": get_system_prompt()},
+        {"role": "user", "content": USER_WRAPPER.format(snips=snippets_block, q=question)}
+    ]
+    
+    options: ChatCompletionOptions = {
+        "temperature": 0,
+        "seed": seed,
+        "num_ctx": num_ctx,
+        "num_predict": num_predict,
+        "top_p": 0.9,
+        "top_k": 40,
+        "repeat_penalty": 1.05
     }
-    sess = get_session(retries=retries)
 
     try:
-        r = sess.post(
-            f"{config.OLLAMA_URL}/api/chat",
-            json=payload,
+        response = chat_completion(
+            messages=messages,
+            model=config.RAG_CHAT_MODEL,
+            options=options,
             timeout=(config.CHAT_CONNECT_T, config.CHAT_READ_T),
-            allow_redirects=False
+            retries=retries
         )
-        r.raise_for_status()
-        j = r.json()
-        msg = (j.get("message") or {}).get("content")
+        msg = (response.get("message") or {}).get("content")
         if msg:
             return msg
-        return j.get("response", "")
-    except (requests.exceptions.ConnectTimeout, requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
-        raise LLMError(f"LLM call failed: {e} [hint: check OLLAMA_URL or increase CHAT timeouts]") from e
-    except requests.exceptions.RequestException as e:
-        raise LLMError(f"LLM request failed: {e}") from e
+        return response.get("response", "")
+    except LLMError:
+        # Re-raise LLMError as is
+        raise
     except Exception as e:
-        raise LLMError(f"Unexpected error in LLM call: {e}") from e
+        raise LLMError(f"LLM call failed: {e} [hint: check RAG_OLLAMA_URL or increase CHAT timeouts]") from e
 
 
 # ====== HYBRID SCORING ======

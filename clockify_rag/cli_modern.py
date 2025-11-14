@@ -13,7 +13,6 @@ import logging
 import os
 import platform
 import sys
-import time
 from pathlib import Path
 from typing import Optional
 
@@ -23,15 +22,12 @@ from rich.panel import Panel
 from rich.table import Table
 
 from . import config
-from . import cli as legacy_cli
-from .answer import answer_once
+from .answer import answer_once, answer_to_json
 from .caching import get_query_cache
 from .cli import ensure_index_ready, chat_repl
 from .embedding import _load_st_encoder
 from .indexing import build, load_index
-from .logging_utils import log_query_event
-from .utils import check_ollama_connectivity, check_pytorch_mps
-from .exceptions import IndexLoadError
+from .utils import check_pytorch_mps, validate_ollama_url
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -170,9 +166,9 @@ def doctor(
             "dependencies": get_dependency_info(),
             "index": get_index_info(),
             "config": {
-                "ollama_url": config.OLLAMA_URL,
-                "gen_model": config.GEN_MODEL,
-                "emb_model": config.EMB_MODEL,
+                "ollama_url": config.RAG_OLLAMA_URL,
+                "gen_model": config.RAG_CHAT_MODEL,
+                "emb_model": config.RAG_EMBED_MODEL,
                 "chunk_size": config.CHUNK_CHARS,
                 "top_k": config.DEFAULT_TOP_K,
                 "pack_top": config.DEFAULT_PACK_TOP,
@@ -181,7 +177,7 @@ def doctor(
 
         # Check Ollama connectivity
         try:
-            check_ollama_connectivity(config.OLLAMA_URL, timeout=3)
+            validate_ollama_url(config.RAG_OLLAMA_URL, timeout=3)
             output["ollama"] = {"connected": True, "error": None}
         except Exception as e:
             output["ollama"] = {"connected": False, "error": str(e)}
@@ -239,8 +235,8 @@ def doctor(
 
     # Ollama Connectivity
     try:
-        normalized_url = check_ollama_connectivity(config.OLLAMA_URL, timeout=3)
-        console.print(f"✅ Ollama: Connected to {normalized_url}")
+        validate_ollama_url(config.RAG_OLLAMA_URL, timeout=3)
+        console.print(f"✅ Ollama: Connected to {config.RAG_OLLAMA_URL}")
     except Exception as e:
         console.print(f"❌ Ollama: Connection failed - {e}")
     console.print()
@@ -249,9 +245,9 @@ def doctor(
     config_table = Table(title="⚙️ Configuration", show_header=False)
     config_table.add_column("Key", style="cyan")
     config_table.add_column("Value", style="white")
-    config_table.add_row("Ollama URL", config.OLLAMA_URL)
-    config_table.add_row("Generation Model", config.GEN_MODEL)
-    config_table.add_row("Embedding Model", config.EMB_MODEL)
+    config_table.add_row("Ollama URL", config.RAG_OLLAMA_URL)
+    config_table.add_row("Generation Model", config.RAG_CHAT_MODEL)
+    config_table.add_row("Embedding Model", config.RAG_EMBED_MODEL)
     config_table.add_row("Chunk Size", str(config.CHUNK_CHARS))
     config_table.add_row("Top-K Retrieval", str(config.DEFAULT_TOP_K))
     config_table.add_row("Pack Top", str(config.DEFAULT_PACK_TOP))
@@ -348,7 +344,6 @@ def query(
     try:
         chunks, vecs_n, bm, hnsw = ensure_index_ready(retries=2)
 
-        call_start = time.time()
         result = answer_once(
             question,
             chunks,
@@ -359,46 +354,46 @@ def query(
             threshold=threshold,
             hnsw=hnsw,
         )
-        latency_ms = (time.time() - call_start) * 1000
 
-        answer_text = result.get("answer", "")
+        answer = result["answer"]
+        meta = result.get("metadata", {})
+        timing = result.get("timing")
+        routing = result.get("routing")
         selected_chunks = result.get("selected_chunks", [])
-        selected_chunk_ids = result.get("selected_chunk_ids") or []
-        sources = selected_chunk_ids or selected_chunks
-        metadata = result.get("metadata", {}) or {}
+        refused = result.get("refused", False)
 
         if json_output:
-            output = {
-                "question": question,
-                "answer": answer_text,
-                "confidence": result.get("confidence"),
-                "sources": sources,
-                "num_sources": len(sources),
-                "metadata": metadata,
-            }
-            console.print(json.dumps(output, indent=2, ensure_ascii=False))
+            used_tokens = meta.get("used_tokens") or len(selected_chunks)
+            payload = answer_to_json(
+                answer,
+                selected_chunks,
+                used_tokens,
+                top_k,
+                pack_top,
+                result.get("confidence"),
+                metadata=meta,
+                routing=routing,
+                timing=timing,
+                refused=refused,
+            )
+            payload["question"] = question
+            payload["sources"] = selected_chunks
+            payload["num_sources"] = len(selected_chunks)
+            console.print(json.dumps(payload, indent=2, ensure_ascii=False))
         else:
             console.print()
-            console.print(answer_text)
-            if debug and sources:
+            console.print(answer)
+            if debug:
                 console.print()
-                console.print(f"[dim]Sources: {sources[:3]}...[/dim]")
-                if metadata:
-                    console.print(f"[dim]Metadata: {metadata}[/dim]")
+                debug_line = (
+                    f"[dim]confidence={result.get('confidence', 'n/a')} "
+                    f"refused={refused} sources={len(selected_chunks)} "
+                    f"total_ms={(timing or {}).get('total_ms', 'n/a')}[/dim]"
+                )
+                console.print(debug_line)
+                if selected_chunks:
+                    console.print(f"[dim]Sources: {selected_chunks[:3]}[/dim]")
 
-        log_query_event(
-            question,
-            result,
-            chunks,
-            latency_ms,
-            channel="cli-modern.query",
-            disabled=getattr(legacy_cli, "QUERY_LOG_DISABLED", False),
-        )
-
-    except IndexLoadError as exc:
-        console.print(f"❌ Index load error: {exc}")
-        logger.error("Index load error: %s", exc)
-        raise typer.Exit(getattr(exc, "exit_code", 1))
     except Exception as e:
         console.print(f"❌ Error: {e}")
         logger.error(f"Query error: {e}", exc_info=True)
@@ -445,10 +440,6 @@ def chat(
     except KeyboardInterrupt:
         console.print("\n👋 Goodbye!")
         raise typer.Exit(0)
-    except IndexLoadError as exc:
-        console.print(f"❌ Index load error: {exc}")
-        logger.error("Index load error: %s", exc)
-        raise typer.Exit(getattr(exc, "exit_code", 1))
     except Exception as e:
         console.print(f"❌ Error: {e}")
         logger.error(f"Chat error: {e}", exc_info=True)
@@ -522,10 +513,6 @@ def eval(
         console.print(f"   python eval.py --dataset {questions_file}")
         raise typer.Exit(0)
 
-    except IndexLoadError as exc:
-        console.print(f"❌ Index load error: {exc}")
-        logger.error("Eval index load error: %s", exc)
-        raise typer.Exit(getattr(exc, "exit_code", 1))
     except Exception as e:
         console.print(f"❌ Evaluation failed: {e}")
         logger.error(f"Eval error: {e}", exc_info=True)

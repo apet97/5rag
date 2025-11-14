@@ -2,6 +2,27 @@
 
 High-level overview of the Clockify RAG system design, components, and data flow.
 
+## Architecture Snapshot
+
+- **Entry points**: `ragctl` Typer CLI (doctor/ingest/query/chat), FastAPI server (`clockify_rag.api:app`), and automation scripts (`scripts/smoke_rag.py`, `eval.py`). Legacy `clockify_support_cli_final.py` still works but wraps the same modules.
+- **Central configuration**: `clockify_rag/config.py` loads defaults, `.env`, and runtime overrides (see `docs/CONFIGURATION.md`). All URLs, model names, timeouts, and artifact paths flow through this module.
+- **Artifacts**: `chunks.jsonl`, `vecs_n.npy`, `bm25.json`, `faiss.index`, and `index.meta.json` live beside the repository and are rebuilt deterministically via `ragctl ingest`.
+- **External services**: 
+  - Ollama-compatible endpoint at `http://10.127.0.192:11434` (default, overridable) for `/api/chat` and `/api/embeddings`.
+  - Local filesystem for corpus Markdown and index artifacts.
+  - Optional FAISS/HNSW libraries for ANN retrieval (falls back to BM25-only mode when unavailable).
+
+## Data Flow at a Glance
+
+1. **Source acquisition** – Markdown, HTML, PDF, DOCX, or CSV files are normalized via `clockify_rag.ingestion`.
+2. **Chunking** – `clockify_rag.chunking.build_chunks` parses documents, enforces size/overlap, and emits deterministic IDs plus metadata (title, URL, section).
+3. **Embedding** – `clockify_rag.embedding.embed_texts` either calls SentenceTransformers locally (`EMB_BACKEND=local`) or the Ollama embedding endpoint (`EMB_BACKEND=ollama`) with retries + caching.
+4. **Indexing** – `clockify_rag.indexing.build` persists FAISS/HNSW indexes alongside BM25 term statistics and stores build metadata for change detection.
+5. **Retrieval** – `clockify_rag.retrieval.retrieve` embeds the query, runs dense + BM25 search, blends scores (alpha/intent aware), and applies MMR diversification.
+6. **Prompt assembly** – `clockify_rag.retrieval.pack_snippets` enforces the configured token budget, formats snippets with IDs/titles, and tracks token consumption.
+7. **Generation** – `clockify_rag.retrieval.ask_llm` and `clockify_rag.answer.answer_once` call the Ollama client, validate JSON, log routing/metrics, and optionally rerank context via LLM or cross-encoder.
+8. **Outputs** – Results surface through the CLI/API with structured metadata (timing, routing, citations) and are logged to `rag_queries.jsonl` when enabled.
+
 ## High-Level Pipeline
 
 ```
