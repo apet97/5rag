@@ -47,6 +47,11 @@ Use this checklist whenever you provision a fresh environment (laptop, CI runner
     make verify
     SMOKE_CLIENT=ollama make verify   # run the same gate against the real endpoint
     ```
+8. **Retrieval regression gate** – enforce MRR/Precision/NDCG thresholds before merging:
+    ```bash
+    make eval-gate
+    EVAL_DATASET=/path/to/custom.jsonl make eval-gate
+    ```
 
 ## 2. Docker Image Verification
 
@@ -70,6 +75,11 @@ Use this checklist whenever you provision a fresh environment (laptop, CI runner
       -e SMOKE_CLIENT=mock \
       -v $(pwd):/app \
       clockify-rag make smoke
+
+    docker run --rm \
+      -e EVAL_DATASET=/app/eval_datasets/clockify_v1.jsonl \
+      -v $(pwd):/app \
+      clockify-rag make eval-gate
     ```
 4. **Runtime command** – by default the container runs `uvicorn clockify_rag.api:app`. Override with `ragctl chat` for REPL workflows:
     ```bash
@@ -83,9 +93,10 @@ Before promoting a build or cutting a release:
 
 - ✅ `pip check` (inside and outside Docker).
 - ✅ `make deps-check` (or `make test-quick` when you only need the pytest subset).
-- ✅ `make verify` (runs `pip check`, the quick pytest subset, and `make smoke` in mock mode). Re-run with `SMOKE_CLIENT=ollama make verify` before a VPN-backed deploy.
+- ✅ `make verify` (runs `pip check`, the quick pytest subset, `make smoke`, and `make eval-gate`). Re-run with `make verify-ollama` (or `SMOKE_CLIENT=ollama make verify`) before a VPN-backed deploy.
 - ✅ `ragctl doctor --json` reports `index_ready=true` and `ollama.connected=true`.
 - ✅ `make smoke` (mock) and `SMOKE_CLIENT=ollama make smoke` if VPN reachability is required.
+- ✅ `make eval-gate` meets thresholds for your dataset (`EVAL_DATASET` defaults to `eval_datasets/clockify_v1.jsonl`).
 - ✅ `python -m pip list | grep faiss` to confirm FAISS is correctly installed (install via conda on macOS arm64 before running pip).
 
 Document the command outputs (or save JSON) in your deployment runbook so the next operator can reproduce the verification quickly.

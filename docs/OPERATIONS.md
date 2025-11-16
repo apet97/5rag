@@ -11,6 +11,7 @@ This guide documents how to operate the Clockify RAG stack once it has been inst
 | Build knowledge base | `make ingest` (alias for `ragctl ingest --input knowledge_full.md`) |
 | Rebuild / refresh indexes | `make reindex` or `ragctl ingest --force --input knowledge_full.md` |
 | Smoke test end-to-end | `make smoke` *(defaults to the mock LLM client; see below)* |
+| Retrieval evaluation | `make eval-gate` *(MRR/NDCG thresholds using eval_datasets/clockify_v1.jsonl)* |
 | Run API locally | `uvicorn clockify_rag.api:app --host 0.0.0.0 --port 8000` |
 | Tail structured query logs | `tail -f rag_queries.jsonl` (or `$RAG_LOG_FILE`) |
 

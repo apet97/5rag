@@ -276,14 +276,17 @@ def generate_llm_answer(
         # Not JSON, use raw response
         answer = raw_response
 
+    client_mode = (get_llm_client_mode("") or "").lower()
+
     # Citation validation
     if packed_ids:
-        client_mode = (get_llm_client_mode("") or "").lower()
         if answer != REFUSAL_STR and client_mode == "mock" and not extract_citations(answer):
             synthesized = ", ".join(str(pid) for pid in packed_ids[:3])
             if synthesized:
                 answer = f"{answer}\n\n[{synthesized}]"
         if client_mode == "mock":
+            if confidence is None:
+                confidence = 100
             return answer, timing, confidence
         has_citations = bool(extract_citations(answer))
 
@@ -306,6 +309,9 @@ def generate_llm_answer(
                     confidence = None
                 else:
                     logger.warning(f"Answer contains invalid citations: {invalid_cites}")
+
+    if client_mode == "mock" and confidence is None:
+        confidence = 100
 
     return answer, timing, confidence
 
@@ -461,6 +467,7 @@ def answer_once(
                 "rerank_reason": rerank_reason,
                 "llm_error": reason,
                 "llm_error_msg": str(error),
+                "source_chunk_ids": _normalize_chunk_ids(packed_ids),
             },
             "routing": get_routing_action(None, refused=True, critical=True),
         }
@@ -524,6 +531,7 @@ def answer_once(
             "used_tokens": used_tokens,
             "rerank_applied": rerank_applied,
             "rerank_reason": rerank_reason,
+            "source_chunk_ids": _normalize_chunk_ids(packed_ids),
         },
         "routing": routing  # Add routing recommendation
     }

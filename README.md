@@ -119,6 +119,9 @@ python3 clockify_support_cli_final.py --selftest
 # Deterministic mock client (default)
 make smoke
 
+# Retrieval evaluation gate (runs MRR/NDCG thresholds)
+make eval-gate
+
 # Dependency + pytest smoke (pip check + targeted tests)
 make deps-check
 
@@ -127,9 +130,14 @@ RAG_OLLAMA_URL=http://10.127.0.192:11434 \
 SMOKE_CLIENT=ollama make smoke
 # or run the script directly
 python3 scripts/smoke_rag.py --client ollama --question "How do I track time?"
+
+# One-shot verification
+make verify
+SMOKE_CLIENT=ollama make verify         # run against the VPN-backed host
+make verify-ollama                      # convenience alias
 ```
 
-`make smoke` wraps `scripts/smoke_rag.py`, which now defaults to the deterministic mock LLM client so CI/laptops stay offline. Override with `SMOKE_CLIENT=ollama make smoke` (or run `python3 scripts/smoke_rag.py --client ollama ...`) to exercise the real endpoint when VPN reachability is available. The script loads the local index, runs `answer_once`, and prints routing + latency stats; non-zero exit codes indicate refusal/error so you can fail fast before exposing the API. `make deps-check` is a lightweight dependency health gate (`pip check` + targeted pytest). For a single command that runs `pip check`, the quick pytest subset, and the smoke test, use `make verify`. See [VERIFICATION.md](VERIFICATION.md) for the full validation script.
+`make smoke` wraps `scripts/smoke_rag.py`, which now defaults to the deterministic mock LLM client so CI/laptops stay offline. Override with `SMOKE_CLIENT=ollama make smoke` (or run `python3 scripts/smoke_rag.py --client ollama ...`) to exercise the real endpoint when VPN reachability is available. The script loads the local index, runs `answer_once`, and prints routing + latency stats; non-zero exit codes indicate refusal/error so you can fail fast before exposing the API. `make deps-check` is a lightweight dependency health gate (`pip check` + targeted pytest). `make eval-gate` enforces retrieval-quality thresholds (MRR@10/Precision@5/NDCG@10) using `eval_datasets/clockify_v1.jsonl`. `make verify` ties everything together (pip check + quick pytest + smoke + eval). See [VERIFICATION.md](VERIFICATION.md) for the full validation script.
 
 ## What's New in v4.1.2
 

@@ -1,11 +1,13 @@
 """Shared pytest fixtures for RAG system tests."""
 
-import pytest
-import numpy as np
 import json
-import tempfile
 import os
+import platform
 import sys
+import tempfile
+
+import numpy as np
+import pytest
 
 # Import from refactored package modules
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -51,8 +53,22 @@ def pytest_configure(config):
         optional_missing.append("torch")
 
     if optional_missing and config.option.verbose >= 0:
-        print(f"\nWARNING: Optional dependencies not installed: {', '.join(optional_missing)}")
-        print("Some tests may be skipped. Install with: pip install -e '.[dev]'\n")
+        faiss_note = ""
+        if "faiss-cpu" in optional_missing:
+            if platform.system() == "Darwin" and platform.machine().lower() == "arm64":
+                faiss_note = (
+                    "FAISS wheels are not published for macOS arm64; install via conda:\n"
+                    "  conda install -c conda-forge faiss-cpu\n"
+                )
+                optional_missing.remove("faiss-cpu")
+            else:
+                faiss_note = "Install faiss-cpu via pip or conda to enable ANN tests.\n"
+
+        if optional_missing:
+            print(f"\nWARNING: Optional dependencies not installed: {', '.join(optional_missing)}")
+            print("Some tests may be skipped. Install with: pip install -e '.[dev]'\n")
+        if faiss_note:
+            print(f"\nINFO: {faiss_note}")
 
 
 from clockify_rag.indexing import build_bm25

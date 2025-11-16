@@ -1,4 +1,4 @@
-.PHONY: help venv install deps-check selftest build chat smoke smoke-full clean dev test eval benchmark benchmark-quick typecheck lint format pre-commit-install pre-commit-run regen-artifacts rebuild-all test-quick verify
+.PHONY: help venv install deps-check selftest build chat smoke smoke-full clean dev test eval benchmark benchmark-quick typecheck lint format pre-commit-install pre-commit-run regen-artifacts rebuild-all test-quick verify verify-ollama eval-gate
 
 help:
 	@echo "v4.1 Clockify RAG CLI - Make Targets"
@@ -16,7 +16,8 @@ help:
 	@echo "  make chat                - Start interactive chat (REPL)"
 	@echo "  make smoke               - Run full smoke test suite"
 	@echo "  make test-quick          - Fast unit tests (config/API client/answer core)"
-	@echo "  make verify              - pip check + make test-quick + make smoke"
+	@echo "  make verify              - pip check + make test-quick + make smoke + make eval-gate"
+	@echo "  make verify-ollama       - Run verify with SMOKE_CLIENT=ollama (VPN required)"
 	@echo "  make test                - Run unit tests with coverage"
 	@echo "  make eval                - Run RAG evaluation on ground truth dataset"
 	@echo "  make benchmark           - Run performance benchmarks (latency, throughput, memory)"
@@ -130,6 +131,7 @@ chat:
 	source rag_env/bin/activate && python3 clockify_support_cli_final.py chat
 
 SMOKE_CLIENT ?= mock
+EVAL_DATASET ?= eval_datasets/clockify_v1.jsonl
 
 .PHONY: smoke
 smoke:
@@ -146,6 +148,7 @@ verify:
 	source rag_env/bin/activate && python -m pip check
 	$(MAKE) test-quick
 	$(MAKE) smoke
+	$(MAKE) eval-gate
 
 .PHONY: smoke-full
 smoke-full:
@@ -208,3 +211,16 @@ dev: venv install pre-commit-install
 	@echo ""
 	@echo "Or run all steps: source rag_env/bin/activate && make build && make chat"
 	@echo ""
+.PHONY: verify-ollama
+verify-ollama:
+	@echo "Running verification gate against real Ollama (VPN required)..."
+	SMOKE_CLIENT=ollama $(MAKE) verify
+
+.PHONY: eval-gate
+eval-gate:
+	@echo "Running retrieval evaluation..."
+	@if [ ! -f "$(EVAL_DATASET)" ]; then \
+		echo "❌ Evaluation dataset $(EVAL_DATASET) not found. Set EVAL_DATASET=/path/to/dataset.jsonl"; \
+		exit 1; \
+	fi
+	python3 eval.py --dataset "$(EVAL_DATASET)"

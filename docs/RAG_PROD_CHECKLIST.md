@@ -8,6 +8,7 @@ Use this checklist before promoting a new build or rolling out changes to the in
 - [ ] `make deps-check` (pip check + pytest smoke) is green on the deployment host.
 - [ ] `make test-quick` (config/API client/answer core tests) is green on the deployment host.
 - [ ] `make verify` (pip check + quick pytest subset + `make smoke`) is archived as part of the release notes/runbook.
+- [ ] `make eval-gate` (MRR@10 / Precision@5 / NDCG@10) meets thresholds for the selected dataset.
 - [ ] Imports audited so every runtime dependency is declared in `pyproject.toml`/`requirements.txt`; unused packages removed.
 - [ ] `VERIFICATION.md` steps (doctor, smoke, Docker pip check) executed and archived in the release notes/runbook.
 
@@ -34,6 +35,7 @@ Use this checklist before promoting a new build or rolling out changes to the in
 - [ ] Retrieval parameters (`DEFAULT_TOP_K`, `DEFAULT_PACK_TOP`, `DEFAULT_THRESHOLD`, `MMR_LAMBDA`) documented for this deployment.
 - [ ] Intent classification enabled/disabled intentionally (`USE_INTENT_CLASSIFICATION`).
 - [ ] `make smoke` (mock) succeeds locally; `SMOKE_CLIENT=ollama make smoke` succeeds on VPN (or run `python3 scripts/smoke_rag.py --client ...` directly).
+- [ ] `make eval-gate` succeeds using the canonical dataset (or environment-specific evaluation set).
 - [ ] Prompt templates reviewed (system/user wrappers) for any policy updates.
 
 ## 5. Tests & Evaluation
