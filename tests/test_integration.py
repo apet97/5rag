@@ -9,7 +9,6 @@ import os
 import tempfile
 import json
 import numpy as np
-from pathlib import Path
 from unittest.mock import patch
 
 # Import from clockify_rag package

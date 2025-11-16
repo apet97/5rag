@@ -1,10 +1,9 @@
 """Embedding generation using local SentenceTransformer or Ollama API."""
 
-import hashlib
 import json
 import logging
 import os
-from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 
 import numpy as np
 
@@ -207,7 +206,7 @@ def embed_texts(texts: list, retries=0) -> np.ndarray:
                 done, _ = wait(pending_futures.keys(), return_when=FIRST_COMPLETED)
 
                 for future in done:
-                    idx = pending_futures.pop(future)
+                    pending_futures.pop(future)
                     idx_result, emb = future.result()  # Will raise if _embed_single_text raised
                     results[idx_result] = emb
                     completed += 1
@@ -276,7 +275,6 @@ def load_embedding_cache() -> dict:
 
                             # Optionally validate backend/model if stored
                             stored_backend = entry.get("backend")
-                            stored_model = entry.get("model")
                             if stored_backend and stored_backend != config.EMB_BACKEND:
                                 filtered_count += 1
                                 logger.debug(

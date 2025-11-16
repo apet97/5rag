@@ -11,14 +11,14 @@ import logging
 import os
 import sys
 import numpy as np
-from typing import Tuple, Optional, Any, List
+from typing import Tuple, List
 
 from . import config
 from .indexing import build, load_index
 from .utils import _log_config_summary, validate_and_set_config, validate_chunk_config, check_pytorch_mps
 from .answer import answer_once, answer_to_json
-from .caching import get_query_cache, get_rate_limiter, log_query
-from .retrieval import set_query_expansion_path, load_query_expansion_dict, QUERY_EXPANSIONS_ENV_VAR
+from .caching import get_query_cache, log_query, get_rate_limiter as _get_rate_limiter
+from .retrieval import set_query_expansion_path, load_query_expansion_dict
 from .precomputed_cache import get_precomputed_cache
 from .api_client import get_llm_client, ChatCompletionOptions, ChatMessage
 from .http_utils import http_post_with_retries
@@ -639,3 +639,6 @@ def handle_chat_command(args):
         retries=getattr(args, "retries", 0),
         use_json=getattr(args, "json", False),
     )
+# Backwards compatibility: expose get_rate_limiter for tests that patch cli.get_rate_limiter
+def get_rate_limiter():
+    return _get_rate_limiter()

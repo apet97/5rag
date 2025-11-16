@@ -3,8 +3,6 @@ import os
 import pytest
 
 from clockify_rag.cli import chat_repl
-from clockify_rag import answer_once, build, load_index
-import clockify_rag.cli as cli_module
 
 
 @pytest.mark.skip(reason="Test needs update: answer_once() return structure changed, load_index() location changed")

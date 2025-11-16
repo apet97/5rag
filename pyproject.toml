@@ -142,9 +142,6 @@ select = [
     "E",     # pycodestyle errors
     "W",     # pycodestyle warnings
     "F",     # pyflakes
-    "I",     # isort
-    "N",     # pep8-naming
-    "UP",    # pyupgrade
 ]
 ignore = [
     "E501",  # line too long (handled by black)
@@ -152,7 +149,6 @@ ignore = [
 
 [tool.ruff.lint.isort]
 known-first-party = ["clockify_rag"]
-profile = "black"
 
 [tool.mypy]
 python_version = "3.11"

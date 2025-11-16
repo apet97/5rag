@@ -5,12 +5,20 @@ import os
 import platform
 import sys
 import tempfile
+import importlib.util
 
 import numpy as np
 import pytest
 
 # Import from refactored package modules
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from clockify_rag.indexing import build_bm25
+from clockify_rag.api_client import MockLLMClient, set_llm_client
+
+
+def _has_module(name: str) -> bool:
+    return importlib.util.find_spec(name) is not None
 
 
 def pytest_configure(config):
@@ -23,14 +31,10 @@ def pytest_configure(config):
     missing = []
 
     # Check required dependencies
-    try:
-        import numpy
-    except ImportError:
+    if not _has_module("numpy"):
         missing.append("numpy")
 
-    try:
-        import requests
-    except ImportError:
+    if not _has_module("requests"):
         missing.append("requests")
 
     if missing:
@@ -42,14 +46,10 @@ def pytest_configure(config):
 
     # Check optional dependencies (just warn)
     optional_missing = []
-    try:
-        import faiss
-    except ImportError:
+    if not _has_module("faiss"):
         optional_missing.append("faiss-cpu")
 
-    try:
-        import torch
-    except ImportError:
+    if not _has_module("torch"):
         optional_missing.append("torch")
 
     if optional_missing and config.option.verbose >= 0:
@@ -69,11 +69,6 @@ def pytest_configure(config):
             print("Some tests may be skipped. Install with: pip install -e '.[dev]'\n")
         if faiss_note:
             print(f"\nINFO: {faiss_note}")
-
-
-from clockify_rag.indexing import build_bm25
-from clockify_rag.config import DEFAULT_TOP_K
-from clockify_rag.api_client import MockLLMClient, set_llm_client
 
 
 @pytest.fixture(autouse=True)

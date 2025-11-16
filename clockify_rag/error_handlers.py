@@ -5,12 +5,10 @@ and graceful degradation strategies across all RAG components.
 """
 
 import logging
-import sys
-import traceback
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple
 from functools import wraps
 
-from .exceptions import LLMError, EmbeddingError, IndexLoadError, BuildError, ValidationError
+from .exceptions import LLMError, EmbeddingError, IndexLoadError, BuildError
 from .config import (
     RAG_OLLAMA_URL,
     RAG_CHAT_MODEL,
@@ -186,9 +184,7 @@ def handle_api_call_errors(func):
             logger.error(error_msg)
             raise
         except Exception as e:
-            error_msg = format_error_message(
-                "API_ERROR", f"API call failed: {str(e)}", f"check API endpoint and credentials"
-            )
+            error_msg = format_error_message("API_ERROR", f"API call failed: {str(e)}", "check API endpoint and credentials")
             logger.error(error_msg)
             raise
 

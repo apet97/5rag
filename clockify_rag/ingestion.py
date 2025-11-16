@@ -5,10 +5,9 @@ This module provides utilities to convert different document formats
 """
 
 import logging
-import os
 import re
 from pathlib import Path
-from typing import List, Dict, Optional, Tuple
+from typing import List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -28,12 +27,6 @@ except ImportError:
     HTML_AVAILABLE = False
     logger.warning("BeautifulSoup4 not available. HTML support will be limited.")
 
-try:
-    import pandas as pd
-
-    PANDAS_AVAILABLE = True
-except ImportError:
-    PANDAS_AVAILABLE = False
     logger.warning("pandas not available. Spreadsheet support will be limited.")
 
 

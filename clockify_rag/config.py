@@ -262,6 +262,7 @@ USE_ANN = (_get_env_value("ANN", "faiss") or "faiss").lower()  # "faiss" or "non
 # FIX (Error #13): Use safe env var parsing
 ANN_NLIST = _parse_env_int("ANN_NLIST", 64, min_val=8, max_val=1024)  # IVF clusters (reduced for stability)
 ANN_NPROBE = _parse_env_int("ANN_NPROBE", 16, min_val=1, max_val=256)  # clusters to search
+FAISS_IVF_MIN_ROWS = _parse_env_int("FAISS_IVF_MIN_ROWS", 20000, min_val=0, max_val=1_000_000)
 
 # ====== HYBRID SCORING (v4.1) ======
 # FIX (Error #13): Use safe env var parsing

@@ -91,7 +91,7 @@ def test_query_cache_concurrent_put_get():
     def reader(start_idx):
         try:
             for i in range(start_idx, start_idx + 10):
-                result = cache.get(f"q{i}")
+                cache.get(f"q{i}")
                 # Result might be None if not yet written or evicted
         except Exception as e:
             errors.append(("reader", e))

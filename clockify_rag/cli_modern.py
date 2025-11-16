@@ -13,7 +13,6 @@ import logging
 import os
 import platform
 import sys
-from pathlib import Path
 from typing import Optional
 
 import typer
@@ -23,11 +22,9 @@ from rich.table import Table
 
 from . import config
 from .answer import answer_once, answer_to_json
-from .caching import get_query_cache
 from .cli import ensure_index_ready, chat_repl
-from .embedding import _load_st_encoder
-from .indexing import build, load_index
-from .utils import check_pytorch_mps, validate_ollama_url, check_ollama_connectivity
+from .indexing import build
+from .utils import check_ollama_connectivity
 
 logger = logging.getLogger(__name__)
 console = Console()

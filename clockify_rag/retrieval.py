@@ -18,20 +18,15 @@ import os
 import pathlib
 import re
 import time
-import unicodedata
-from collections import Counter
 from typing import Any, Optional, Dict, List, Tuple
 
 import numpy as np
 import clockify_rag.config as config
 from .embedding import embed_query as _embedding_embed_query
 from .exceptions import LLMError, ValidationError
-from .http_utils import get_session
 from .indexing import bm25_scores, get_faiss_index
 from .utils import tokenize  # FIX (Error #17): Import tokenize from utils instead of duplicating
 from .intent_classification import classify_intent, get_intent_metadata, adjust_scores_by_intent
-from .api_client import ChatMessage, ChatCompletionOptions
-
 logger = logging.getLogger(__name__)
 
 # ====== RETRIEVAL PROFILING ======
@@ -79,6 +74,9 @@ def get_system_prompt() -> str:
     enabling dynamic prompt generation for testing and customization.
     """
     return _SYSTEM_PROMPT_TEMPLATE.format(refusal=config.REFUSAL_STR)
+
+
+SYSTEM_PROMPT = None  # Dynamically resolved via __getattr__
 
 
 USER_WRAPPER = """SNIPPETS:
@@ -505,13 +503,13 @@ def retrieve(
 
     if faiss_index:
         # Only score FAISS candidates, don't compute full corpus
-        D, I = faiss_index.search(
+        distances, indices = faiss_index.search(
             qv_n.reshape(1, -1).astype("float32"),
             max(config.ANN_CANDIDATE_MIN, top_k * config.FAISS_CANDIDATE_MULTIPLIER),
         )
         # Filter indices and distances together to maintain alignment
         # (prevents misalignment when FAISS returns -1 sentinels)
-        valid_pairs = [(int(i), float(d)) for i, d in zip(I[0], D[0]) if 0 <= i < n_chunks]
+        valid_pairs = [(int(i), float(d)) for i, d in zip(indices[0], distances[0]) if 0 <= i < n_chunks]
         candidate_idx = [i for i, _ in valid_pairs]
         dense_from_ann = np.array([d for _, d in valid_pairs], dtype=np.float32)
 
@@ -687,13 +685,11 @@ def rerank_with_llm(
     if retries is None:
         retries = config.DEFAULT_RETRIES
 
-    from .api_client import chat_completion, ChatMessage, ChatCompletionOptions
+    from .api_client import chat_completion
 
-    messages: List[ChatMessage] = [
-        {"role": "user", "content": RERANK_PROMPT.format(q=question, passages=passages_text)}
-    ]
+    messages = [{"role": "user", "content": RERANK_PROMPT.format(q=question, passages=passages_text)}]
 
-    options: ChatCompletionOptions = {
+    options = {
         "temperature": 0,
         "seed": seed,
         "num_ctx": num_ctx,
@@ -879,14 +875,14 @@ def ask_llm(
     if retries is None:
         retries = config.DEFAULT_RETRIES
 
-    from .api_client import chat_completion, ChatMessage, ChatCompletionOptions
+    from .api_client import chat_completion
 
-    messages: List[ChatMessage] = [
+    messages = [
         {"role": "system", "content": get_system_prompt()},
         {"role": "user", "content": USER_WRAPPER.format(snips=snippets_block, q=question)},
     ]
 
-    options: ChatCompletionOptions = {
+    options = {
         "temperature": 0,
         "seed": seed,
         "num_ctx": num_ctx,

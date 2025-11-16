@@ -2,7 +2,6 @@
 
 import atexit
 import logging
-import os
 import threading
 import weakref
 

@@ -13,14 +13,12 @@ import json
 import logging
 import os
 import platform
-import signal
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime
 from functools import partial
 from typing import Optional, Dict, Any
 
-import typer
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -81,7 +79,7 @@ class QueryRequest(BaseModel):
         v_lower = v.lower()
         for pattern in suspicious_patterns:
             if pattern in v_lower:
-                raise ValueError(f"Invalid content detected in question")
+                raise ValueError("Invalid content detected in question")
 
         # Ensure only printable characters (allow unicode for i18n)
         if not all(c.isprintable() or c.isspace() for c in v):

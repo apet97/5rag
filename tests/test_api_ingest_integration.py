@@ -1,7 +1,5 @@
 import asyncio
 
-import asyncio
-
 import pytest
 import httpx
 from asgi_lifespan import LifespanManager

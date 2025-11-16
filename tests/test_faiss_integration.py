@@ -18,11 +18,12 @@ import pytest
 import numpy as np
 import threading
 import time
-from pathlib import Path
+
+from clockify_rag.indexing import build_faiss_index, load_faiss_index, save_faiss_index
 
 # Check if FAISS is available (may not be in CI)
 try:
-    import faiss
+    import faiss  # noqa: F401
 
     FAISS_AVAILABLE = True
 except ImportError:
@@ -32,10 +33,6 @@ except ImportError:
 pytestmark = pytest.mark.skipif(
     not FAISS_AVAILABLE, reason="FAISS not installed (expected in CI, install via conda for M1 compatibility)"
 )
-
-# Import from package
-from clockify_rag import config
-from clockify_rag.indexing import build_faiss_index, load_faiss_index, save_faiss_index
 
 
 @pytest.fixture
@@ -87,8 +84,6 @@ class TestFAISSIndexBuilding:
 
     def test_build_small_corpus_linear_fallback(self, temp_dir, small_embeddings):
         """Test that small corpus falls back to linear search (no IVF)."""
-        index_path = os.path.join(temp_dir, "faiss_small.index")
-
         # Build index with small corpus
         index = build_faiss_index(small_embeddings, nlist=64)
 
@@ -98,17 +93,15 @@ class TestFAISSIndexBuilding:
 
         # Test search
         query = small_embeddings[0:1]
-        D, I = index.search(query, k=10)
-        assert D.shape == (1, 10)
-        assert I.shape == (1, 10)
+        distances, indices = index.search(query, k=10)
+        assert distances.shape == (1, 10)
+        assert indices.shape == (1, 10)
         # First result should be the query itself (index 0)
-        assert I[0, 0] == 0
-        assert D[0, 0] >= 0.99  # Should be ~1.0 (normalized vectors)
+        assert indices[0, 0] == 0
+        assert distances[0, 0] >= 0.99  # Should be ~1.0 (normalized vectors)
 
     def test_build_medium_corpus_with_ivf(self, temp_dir, medium_embeddings):
         """Test IVF index building with medium corpus."""
-        index_path = os.path.join(temp_dir, "faiss_medium.index")
-
         # Build index with medium corpus
         index = build_faiss_index(medium_embeddings, nlist=64)
 
@@ -118,17 +111,15 @@ class TestFAISSIndexBuilding:
         # Test search with nprobe
         index.nprobe = 16
         query = medium_embeddings[0:1]
-        D, I = index.search(query, k=20)
+        distances, indices = index.search(query, k=20)
 
-        assert D.shape == (1, 20)
-        assert I.shape == (1, 20)
+        assert distances.shape == (1, 20)
+        assert indices.shape == (1, 20)
         # First result should be the query itself
-        assert I[0, 0] == 0
+        assert indices[0, 0] == 0
 
     def test_build_large_corpus_with_ivf(self, temp_dir, large_embeddings):
         """Test IVF index building with large corpus."""
-        index_path = os.path.join(temp_dir, "faiss_large.index")
-
         # Build index with large corpus
         index = build_faiss_index(large_embeddings, nlist=128)
 
@@ -138,10 +129,10 @@ class TestFAISSIndexBuilding:
         # Test search accuracy
         index.nprobe = 32
         query = large_embeddings[100:101]
-        D, I = index.search(query, k=50)
+        distances, indices = index.search(query, k=50)
 
         # Should find the query vector itself in top results
-        assert 100 in I[0]
+        assert 100 in indices[0]
 
     def test_index_persistence(self, temp_dir, medium_embeddings):
         """Test that index can be saved and loaded."""
@@ -207,8 +198,6 @@ class TestFAISSThreadSafety:
 
     def test_concurrent_search(self, temp_dir, medium_embeddings):
         """Test that multiple threads can search index concurrently."""
-        index_path = os.path.join(temp_dir, "faiss_concurrent.index")
-
         # Build index
         index = build_faiss_index(medium_embeddings, nlist=64)
         assert index is not None
@@ -220,8 +209,8 @@ class TestFAISSThreadSafety:
         def search_worker(thread_id):
             try:
                 query = medium_embeddings[thread_id : thread_id + 1]
-                D, I = index.search(query, k=10)
-                results.append((thread_id, D, I))
+                distances, indices = index.search(query, k=10)
+                results.append((thread_id, distances, indices))
             except Exception as e:
                 errors.append((thread_id, e))
 
@@ -241,10 +230,10 @@ class TestFAISSThreadSafety:
         assert len(results) == 10
 
         # Verify each thread found its own query vector
-        for thread_id, D, I in results:
-            assert I.shape == (1, 10)
+        for thread_id, distances, indices in results:
+            assert indices.shape == (1, 10)
             # Query vector should be in top results
-            assert thread_id in I[0]
+            assert thread_id in indices[0]
 
     def test_concurrent_load(self, temp_dir, medium_embeddings):
         """Test that multiple threads can safely load index."""
@@ -290,8 +279,6 @@ class TestFAISSSearchAccuracy:
 
     def test_approximate_vs_exact_search(self, temp_dir, medium_embeddings):
         """Test that FAISS approximate search is close to exact search."""
-        index_path = os.path.join(temp_dir, "faiss_accuracy.index")
-
         # Build index
         index = build_faiss_index(medium_embeddings, nlist=64)
         index.nprobe = 32  # High nprobe for better accuracy
@@ -319,8 +306,6 @@ class TestFAISSSearchAccuracy:
 
     def test_nprobe_effect_on_accuracy(self, temp_dir, large_embeddings):
         """Test that higher nprobe improves search accuracy."""
-        index_path = os.path.join(temp_dir, "faiss_nprobe.index")
-
         # Build index
         index = build_faiss_index(large_embeddings, nlist=128)
 
@@ -334,8 +319,8 @@ class TestFAISSSearchAccuracy:
         recalls = {}
         for nprobe in [1, 4, 16, 64]:
             index.nprobe = nprobe
-            D, I = index.search(query, k=20)
-            overlap = len(set(I[0]) & I_exact)
+            distances, indices = index.search(query, k=20)
+            overlap = len(set(indices[0]) & I_exact)
             recalls[nprobe] = overlap / 20.0
 
         # Higher nprobe should give better recall
@@ -351,8 +336,6 @@ class TestFAISSARMMacCompatibility:
 
     def test_arm64_safe_nlist(self, temp_dir, medium_embeddings):
         """Test that nlist=64 works on ARM64 (vs. nlist=256 which can segfault)."""
-        index_path = os.path.join(temp_dir, "faiss_arm64.index")
-
         # This should not crash on ARM64 macOS
         index = build_faiss_index(medium_embeddings, nlist=64)
 
@@ -362,10 +345,10 @@ class TestFAISSARMMacCompatibility:
         # Test search
         query = medium_embeddings[0:1]
         index.nprobe = 16
-        D, I = index.search(query, k=10)
+        distances, indices = index.search(query, k=10)
 
-        assert D.shape == (1, 10)
-        assert I.shape == (1, 10)
+        assert distances.shape == (1, 10)
+        assert indices.shape == (1, 10)
 
     def test_large_corpus_training(self, temp_dir):
         """Test that large corpus IVF training completes without crash."""
@@ -374,8 +357,6 @@ class TestFAISSARMMacCompatibility:
         large_vecs = np.random.randn(10000, 768).astype(np.float32)
         norms = np.linalg.norm(large_vecs, axis=1, keepdims=True)
         large_vecs = large_vecs / np.maximum(norms, 1e-9)
-
-        index_path = os.path.join(temp_dir, "faiss_large_train.index")
 
         # This should complete without segfault
         start = time.time()
@@ -394,7 +375,6 @@ class TestFAISSFallback:
 
     def test_empty_vectors(self, temp_dir):
         """Test handling of empty vector array."""
-        index_path = os.path.join(temp_dir, "faiss_empty.index")
         empty_vecs = np.array([], dtype=np.float32).reshape(0, 768)
 
         index = build_faiss_index(empty_vecs, nlist=64)
@@ -405,8 +385,6 @@ class TestFAISSFallback:
 
     def test_invalid_dimensions(self, temp_dir):
         """Test handling of mismatched dimensions."""
-        index_path = os.path.join(temp_dir, "faiss_mismatch.index")
-
         # Build with 384-dim
         vecs_384 = np.random.randn(100, 384).astype(np.float32)
         index = build_faiss_index(vecs_384, nlist=32)

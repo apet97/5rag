@@ -23,7 +23,6 @@ from .utils import (
     atomic_write_json,
     tokenize,
     compute_sha256,
-    _fsync_dir,
 )
 from .metrics import get_metrics, MetricNames
 
@@ -56,15 +55,32 @@ def build_faiss_index(vecs: np.ndarray, nlist: int = 256, metric: str = "ip") ->
     if faiss is None:
         return None
 
+    total_vecs = len(vecs)
+    if total_vecs == 0:
+        logger.info("FAISS: received empty vector matrix; returning None")
+        return None
+
     dim = vecs.shape[1]
     vecs_f32 = np.ascontiguousarray(vecs.astype("float32"))
+
+    if total_vecs < config.FAISS_IVF_MIN_ROWS:
+        logger.info(
+            "FAISS: using IndexFlatIP fallback for %d vectors (< %d IVF threshold)",
+            total_vecs,
+            config.FAISS_IVF_MIN_ROWS,
+        )
+        index = faiss.IndexFlatIP(dim)
+        index.add(vecs_f32)
+        return index
 
     # Detect macOS arm64 and optimize for M1/M2/M3 chips
     is_macos_arm64 = platform.system() == "Darwin" and platform.machine() == "arm64"
 
     if is_macos_arm64:
-        # Rank 22: Try IVFFlat with smaller nlist=32 for M1 Macs
-        m1_nlist = 32
+        # Rank 22: Try IVFFlat with smaller default nlist for M1 Macs.
+        # Scale with corpus size to preserve accuracy on larger builds.
+        dynamic_nlist = max(32, min(nlist, total_vecs // 20 or 32))
+        m1_nlist = max(32, dynamic_nlist)
         m1_train_size = min(1000, len(vecs))
 
         logger.info(f"macOS arm64 detected: attempting IVFFlat with nlist={m1_nlist}, train_size={m1_train_size}")
@@ -87,11 +103,11 @@ def build_faiss_index(vecs: np.ndarray, nlist: int = 256, metric: str = "ip") ->
             index.add(vecs_f32)
 
             logger.info(f"✓ Successfully built IVFFlat index on M1 (nlist={m1_nlist}, vectors={len(vecs)})")
-            logger.info(f"  Expected speedup: 10-50x over linear search for similarity queries")
+            logger.info("  Expected speedup: 10-50x over linear search for similarity queries")
 
         except (RuntimeError, SystemError, OSError) as e:
             logger.warning(f"IVFFlat training failed on M1: {type(e).__name__}: {str(e)[:100]}")
-            logger.info(f"Falling back to IndexFlatIP (linear search) for stability")
+            logger.info("Falling back to IndexFlatIP (linear search) for stability")
             index = faiss.IndexFlatIP(dim)
             index.add(vecs_f32)
     else:
@@ -444,7 +460,7 @@ def build(md_path: str, retries=0):
             "built_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
         atomic_write_json(config.FILES["index_meta"], index_meta)
-        logger.info(f"  Saved index metadata")
+        logger.info("  Saved index metadata")
 
         # Invalidate global FAISS cache to force reload of new index
         reset_faiss_index()
@@ -497,8 +513,8 @@ def load_index():
         )
         logger.error(f"   Expected dimension: {config.EMB_DIM}")
         logger.error("")
-        logger.error(f"💡 Solution: Rebuild the index with the current backend:")
-        logger.error(f"   python3 clockify_support_cli.py build knowledge_full.md")
+        logger.error("💡 Solution: Rebuild the index with the current backend:")
+        logger.error("   python3 clockify_support_cli.py build knowledge_full.md")
         logger.error("")
         return None
 
@@ -522,10 +538,10 @@ def load_index():
             f"❌ Embedding dimension mismatch: stored={stored_dim}, expected={expected_dim} "
             f"(backend={config.EMB_BACKEND})"
         )
-        logger.error(f"   This usually happens after switching embedding backends without rebuilding.")
+        logger.error("   This usually happens after switching embedding backends without rebuilding.")
         logger.error("")
-        logger.error(f"💡 Solution: Rebuild the index:")
-        logger.error(f"   python3 clockify_support_cli.py build knowledge_full.md")
+        logger.error("💡 Solution: Rebuild the index:")
+        logger.error("   python3 clockify_support_cli.py build knowledge_full.md")
         logger.error("")
         return None
 

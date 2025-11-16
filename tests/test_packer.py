@@ -68,7 +68,6 @@ class TestContextPacking:
 
     def test_pack_handles_empty_selection(self):
         """Test packing with no selected chunks."""
-        chunks = []
         packed_text = ""
 
         assert packed_text == ""

@@ -5,7 +5,7 @@ and indexes that integrate with the Clockify RAG system.
 """
 
 import logging
-from typing import List, Tuple, Any
+from typing import List, Tuple
 
 import numpy as np
 

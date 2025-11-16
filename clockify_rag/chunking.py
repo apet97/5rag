@@ -9,7 +9,7 @@ import pathlib
 import re
 import unicodedata
 import uuid
-from typing import List, Dict, Optional
+from typing import List, Dict
 
 from .config import CHUNK_CHARS, CHUNK_OVERLAP
 from .utils import norm_ws, strip_noise

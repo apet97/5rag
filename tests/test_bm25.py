@@ -9,7 +9,6 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from clockify_rag.indexing import build_bm25, bm25_scores
-from clockify_rag.utils import tokenize
 
 
 class TestBM25:

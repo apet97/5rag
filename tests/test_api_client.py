@@ -11,7 +11,7 @@ from clockify_rag.api_client import (
     reset_llm_client,
 )
 from clockify_rag import config
-from clockify_rag.exceptions import EmbeddingError, LLMError, LLMUnavailableError, LLMBadResponseError
+from clockify_rag.exceptions import EmbeddingError, LLMUnavailableError, LLMBadResponseError
 
 
 class DummyResponse:

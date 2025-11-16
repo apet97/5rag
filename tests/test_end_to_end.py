@@ -4,18 +4,14 @@ This module tests the complete workflow from ingestion to query processing
 using a simple test document and mocked external dependencies.
 """
 
-import json
 import tempfile
 from pathlib import Path
 from unittest import mock
 
 import numpy as np
-import pytest
 
 from clockify_rag.config import FILES, EMB_DIM
-from clockify_rag.chunking import build_chunks
 from clockify_rag.indexing import build, load_index
-from clockify_rag.answer import answer_once
 
 
 def test_end_to_end_rag_pipeline():
@@ -56,7 +52,8 @@ If you encounter issues, try rebuilding the index or checking your configuration
                 vectors.append(rng.standard_normal(EMB_DIM))
             return np.array(vectors, dtype="float32")
 
-        fake_embed_query = lambda text, **kwargs: _fake_embed([text], **kwargs)[0]
+        def fake_embed_query(text, **kwargs):
+            return _fake_embed([text], **kwargs)[0]
 
         with (
             mock.patch("clockify_rag.embedding.embed_local_batch", _fake_embed),
@@ -96,9 +93,6 @@ If you encounter issues, try rebuilding the index or checking your configuration
             from clockify_rag.retrieval import retrieve, pack_snippets
             from clockify_rag.answer import apply_mmr_diversification
 
-            # Mock basic retrieval functionality
-            import clockify_rag.config as config
-
             # Test retrieval
             from clockify_rag.embedding import embed_query
 
@@ -125,7 +119,7 @@ If you encounter issues, try rebuilding the index or checking your configuration
             assert len(context_block) > 0, "Context block is empty"
             assert len(packed_ids) == len(mmr_selected), "Packed IDs count doesn't match"
 
-            print(f"✓ End-to-end test passed!")
+            print("✓ End-to-end test passed!")
             print(f"  - Built index with {len(chunks)} chunks")
             print(f"  - Retrieved {len(selected)} candidates")
             print(f"  - Applied MMR to get {len(mmr_selected)} diversified results")
@@ -160,7 +154,7 @@ def test_config_validation():
     assert isinstance(config.DEFAULT_TOP_K, int), "DEFAULT_TOP_K should be an integer"
     assert config.DEFAULT_TOP_K > 0, "DEFAULT_TOP_K should be positive"
 
-    print(f"✓ Configuration validation passed!")
+    print("✓ Configuration validation passed!")
     print(f"  - RAG_OLLAMA_URL: {config.RAG_OLLAMA_URL}")
     print(f"  - RAG_CHAT_MODEL: {config.RAG_CHAT_MODEL}")
     print(f"  - RAG_EMBED_MODEL: {config.RAG_EMBED_MODEL}")

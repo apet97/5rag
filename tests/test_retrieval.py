@@ -90,7 +90,7 @@ def test_retrieve_returns_correct_top_k(sample_chunks, sample_embeddings, sample
     selected, scores = retrieve(question, sample_chunks, sample_embeddings, sample_bm25, top_k=top_k)
 
     assert len(selected) <= top_k, f"Should return at most {top_k} results, got {len(selected)}"
-    assert all(isinstance(idx, (int, np.integer)) for idx in selected), "Indices should be integers"
+    assert all(isinstance(idx, int | np.integer) for idx in selected), "Indices should be integers"
     assert all(0 <= idx < len(sample_chunks) for idx in selected), "Indices should be valid"
 
 
@@ -277,12 +277,14 @@ def test_retrieve_faiss_skips_full_dot(monkeypatch, sample_chunks, sample_embedd
     tracker = TrackingMatrix(sample_embeddings)
     fake_index = FakeFaissIndex()
 
-    monkeypatch.setattr(cli, "_FAISS_INDEX", fake_index, raising=False)
-    monkeypatch.setattr(cli, "USE_ANN", "faiss", raising=False)
+    import clockify_rag.config as config_module
+    import clockify_rag.retrieval as retrieval_module
+
+    monkeypatch.setattr(retrieval_module, "_FAISS_INDEX", fake_index, raising=False)
+    monkeypatch.setattr(config_module, "USE_ANN", "faiss", raising=False)
 
     # Avoid external embedding call - patch in the retrieval module where it's actually called
     query_vec = sample_embeddings[0]
-    import clockify_rag.retrieval as retrieval_module
 
     monkeypatch.setattr(retrieval_module, "embed_query", lambda question, retries=0: query_vec, raising=False)
 

@@ -13,7 +13,7 @@ import json
 
 import pytest
 import numpy as np
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 from clockify_rag.answer import (
     apply_mmr_diversification,

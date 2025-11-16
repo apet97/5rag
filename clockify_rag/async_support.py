@@ -273,8 +273,6 @@ async def async_answer_once(
 
     # Retrieve (synchronous for now, retrieval is fast)
     t0 = time.time()
-    from .retrieval import retrieve
-
     selected, scores = retrieve(
         question, chunks, vecs_n, bm, top_k=top_k, hnsw=hnsw, retries=retries, faiss_index_path=faiss_index_path
     )
