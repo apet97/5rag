@@ -639,6 +639,8 @@ def handle_chat_command(args):
         retries=getattr(args, "retries", 0),
         use_json=getattr(args, "json", False),
     )
+
+
 # Backwards compatibility: expose get_rate_limiter for tests that patch cli.get_rate_limiter
 def get_rate_limiter():
     return _get_rate_limiter()

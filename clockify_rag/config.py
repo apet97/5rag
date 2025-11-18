@@ -133,6 +133,12 @@ def get_query_expansions_path() -> Optional[str]:
 
 
 # ====== OLLAMA CONFIG ======
+# 🚀 ZERO CONFIGURATION REQUIRED
+# Default LLM base URL is hardcoded below - works out-of-box with NO env vars!
+# Only set RAG_OLLAMA_URL environment variable if you want to override the default.
+# Default: Company VPN endpoint at http://10.127.0.192:11434
+# Override example: RAG_OLLAMA_URL=http://127.0.0.1:11434 (for local Ollama)
+
 _DEFAULT_RAG_OLLAMA_URL = "http://10.127.0.192:11434"
 DEFAULT_RAG_OLLAMA_URL = _DEFAULT_RAG_OLLAMA_URL
 DEFAULT_LOCAL_OLLAMA_URL = "http://127.0.0.1:11434"
@@ -153,6 +159,57 @@ RAG_EMBED_MODEL = _get_env_value(
     legacy_keys=("EMB_MODEL", "EMBED_MODEL"),
 )
 
+# ====== PROVIDER SELECTION (GPT-OSS-20B Integration) ======
+# RAG_PROVIDER: Select LLM backend ("ollama" or "gpt-oss")
+# - "ollama": Use standard Ollama with qwen2.5:32b (default)
+# - "gpt-oss": Use OpenAI's gpt-oss-20b reasoning model (128k context)
+RAG_PROVIDER = _get_env_value("RAG_PROVIDER", default="ollama").lower()
+
+# ====== GPT-OSS-20B CONFIG ======
+# GPT-OSS-20B: OpenAI's open-weight 20B reasoning model
+# - 128k context window (vs qwen2.5:32b's 32k)
+# - ~21B total params, ~3.6B active per token (MoE architecture)
+# - Optimized for reasoning and coding tasks
+# - Served via Ollama-compatible API at same endpoint
+
+# Model name for GPT-OSS (when RAG_PROVIDER=gpt-oss)
+RAG_GPT_OSS_MODEL = _get_env_value("RAG_GPT_OSS_MODEL", default="gpt-oss:20b")
+
+# Sampling parameters for GPT-OSS
+# OpenAI recommends temperature=1.0, top_p=1.0 for optimal reasoning
+# For RAG QA, you may prefer slightly lower temperature (e.g., 0.7) for more deterministic answers
+RAG_GPT_OSS_TEMPERATURE = _parse_env_float("RAG_GPT_OSS_TEMPERATURE", 1.0, min_val=0.0, max_val=2.0)
+RAG_GPT_OSS_TOP_P = _parse_env_float("RAG_GPT_OSS_TOP_P", 1.0, min_val=0.0, max_val=1.0)
+
+# Context window and budget for GPT-OSS
+# GPT-OSS has 128k token context window (vs qwen's 32k)
+# We can use more context for retrieval while still leaving room for generation
+RAG_GPT_OSS_CTX_WINDOW = _parse_env_int("RAG_GPT_OSS_CTX_WINDOW", 128000, min_val=4096, max_val=200000)  # 128k tokens
+
+# Context budget for RAG snippets when using GPT-OSS
+# Allocate ~12.5% of 128k context (16k tokens) for snippets, leaving room for:
+# - System instructions (~500 tokens)
+# - User question (~100 tokens)
+# - Response generation (~2k tokens)
+# - Safety margin for tokenization variance
+RAG_GPT_OSS_CTX_BUDGET = _parse_env_int(
+    "RAG_GPT_OSS_CTX_BUDGET", 16000, min_val=1000, max_val=100000
+)  # 16k tokens for snippets
+
+# Timeout settings for GPT-OSS (reasoning models may take longer)
+# Chat timeout increased to 180s (vs 120s for qwen) to allow for reasoning traces
+RAG_GPT_OSS_CHAT_TIMEOUT = _parse_env_float("RAG_GPT_OSS_CHAT_TIMEOUT", 180.0, min_val=10.0, max_val=600.0)
+
+# ====== AUTOMATIC MODEL FALLBACK ======
+# Enable automatic fallback to secondary model when primary model is unavailable
+# This prevents total service failure when the primary model (qwen2.5:32b) is down
+RAG_FALLBACK_ENABLED = _get_env_value("RAG_FALLBACK_ENABLED", default="true").lower() in ("true", "1", "yes")
+
+# Fallback provider and model to use when primary is unavailable
+# Default: Fall back to gpt-oss:20b (128k context, good reasoning ability)
+RAG_FALLBACK_PROVIDER = _get_env_value("RAG_FALLBACK_PROVIDER", default="gpt-oss").lower()
+RAG_FALLBACK_MODEL = _get_env_value("RAG_FALLBACK_MODEL", default="gpt-oss:20b")
+
 _INITIAL_RAG_LLM_CLIENT = _get_env_value("RAG_LLM_CLIENT", default="")
 
 
@@ -164,6 +221,7 @@ class LLMSettings:
     chat_model: str
     embed_model: str
     client_mode: str
+    provider: str  # "ollama" or "gpt-oss"
 
 
 def get_llm_client_mode(default: str = "") -> str:
@@ -179,14 +237,52 @@ def get_llm_client_mode(default: str = "") -> str:
 
 
 def current_llm_settings(default_client_mode: str = "") -> LLMSettings:
-    """Return a dataclass capturing the current Ollama + model configuration."""
+    """Return a dataclass capturing the current LLM configuration.
+
+    When RAG_PROVIDER=gpt-oss, returns gpt-oss-specific settings.
+    Otherwise, returns standard Ollama settings (default).
+    """
+    provider = RAG_PROVIDER
+
+    # Select model based on provider
+    if provider == "gpt-oss":
+        chat_model = RAG_GPT_OSS_MODEL
+    else:
+        chat_model = RAG_CHAT_MODEL
 
     return LLMSettings(
         base_url=RAG_OLLAMA_URL,
-        chat_model=RAG_CHAT_MODEL,
+        chat_model=chat_model,
         embed_model=RAG_EMBED_MODEL,
         client_mode=get_llm_client_mode(default_client_mode),
+        provider=provider,
     )
+
+
+def get_context_budget() -> int:
+    """Get the appropriate context budget based on active provider.
+
+    Returns:
+        Context budget in tokens:
+        - GPT-OSS: 16000 tokens (~12.5% of 128k context)
+        - Ollama/default: 12000 tokens (~36% of 32k context)
+    """
+    if RAG_PROVIDER == "gpt-oss":
+        return RAG_GPT_OSS_CTX_BUDGET
+    return CTX_TOKEN_BUDGET
+
+
+def get_context_window() -> int:
+    """Get the appropriate context window size based on active provider.
+
+    Returns:
+        Context window size in tokens:
+        - GPT-OSS: 128000 tokens (128k)
+        - Ollama/default: 32768 tokens (32k)
+    """
+    if RAG_PROVIDER == "gpt-oss":
+        return RAG_GPT_OSS_CTX_WINDOW
+    return DEFAULT_NUM_CTX
 
 
 # Backwards-compatible aliases (legacy code/tests expect these names)
@@ -414,3 +510,107 @@ COVERAGE_MIN_CHUNKS = 2  # Minimum chunks above threshold to proceed
 # OPTIMIZATION: Pre-generate answers for top FAQs for 100% cache hit on common queries
 FAQ_CACHE_ENABLED = _get_bool_env("FAQ_CACHE_ENABLED", "0")  # Disabled by default (requires build step)
 FAQ_CACHE_PATH = _get_env_value("FAQ_CACHE_PATH", "faq_cache.json") or "faq_cache.json"
+
+
+# ====== CONFIGURATION VALIDATION ======
+
+
+def validate_config() -> dict:
+    """Validate the current RAG configuration for common issues.
+
+    Checks for:
+    - URL format and reachability (basic validation)
+    - Fallback configuration sanity
+    - Timeout settings reasonableness
+    - Model name consistency
+
+    Returns:
+        Dictionary with validation results:
+        {
+            "valid": bool,  # True if all checks pass
+            "warnings": List[str],  # List of warning messages
+            "errors": List[str],  # List of error messages
+            "config_snapshot": dict,  # Current config values
+        }
+
+    Note:
+        This does NOT check if the server is actually reachable.
+        Use api_client.validate_models() to check server connectivity
+        and model availability.
+    """
+    warnings = []
+    errors = []
+
+    # Check URL format
+    if not RAG_OLLAMA_URL.startswith(("http://", "https://")):
+        errors.append(f"RAG_OLLAMA_URL must start with http:// or https://, got: {RAG_OLLAMA_URL}")
+
+    # Check fallback configuration
+    if RAG_FALLBACK_ENABLED:
+        if RAG_PROVIDER == RAG_FALLBACK_PROVIDER:
+            warnings.append(
+                f"Fallback enabled but primary provider ({RAG_PROVIDER}) "
+                f"is same as fallback provider ({RAG_FALLBACK_PROVIDER}). "
+                "Fallback will have no effect."
+            )
+
+        if RAG_PROVIDER == "gpt-oss" and RAG_FALLBACK_PROVIDER == "gpt-oss":
+            warnings.append(
+                "Both primary and fallback are set to gpt-oss. " "Consider setting fallback to 'ollama' for redundancy."
+            )
+
+    # Check timeout settings
+    if CHAT_READ_T < 30:
+        warnings.append(
+            f"CHAT_READ_T ({CHAT_READ_T}s) is very short. "
+            "LLM responses may timeout. Consider increasing to at least 60s."
+        )
+
+    if EMB_READ_T < 10:
+        warnings.append(
+            f"EMB_READ_T ({EMB_READ_T}s) is very short. "
+            "Embedding generation may timeout. Consider increasing to at least 30s."
+        )
+
+    # Check retrieval parameters
+    if DEFAULT_TOP_K < DEFAULT_PACK_TOP:
+        errors.append(f"DEFAULT_TOP_K ({DEFAULT_TOP_K}) must be >= DEFAULT_PACK_TOP ({DEFAULT_PACK_TOP})")
+
+    if DEFAULT_THRESHOLD < 0.0 or DEFAULT_THRESHOLD > 1.0:
+        errors.append(f"DEFAULT_THRESHOLD ({DEFAULT_THRESHOLD}) must be between 0.0 and 1.0")
+
+    # Check context budget
+    if CTX_TOKEN_BUDGET <= 0:
+        errors.append(f"CTX_TOKEN_BUDGET ({CTX_TOKEN_BUDGET}) must be > 0")
+
+    if RAG_PROVIDER == "gpt-oss" and RAG_GPT_OSS_CTX_BUDGET > RAG_GPT_OSS_CTX_WINDOW:
+        warnings.append(
+            f"GPT-OSS context budget ({RAG_GPT_OSS_CTX_BUDGET}) "
+            f"exceeds context window ({RAG_GPT_OSS_CTX_WINDOW}). "
+            "Responses may be truncated."
+        )
+
+    # Build config snapshot
+    config_snapshot = {
+        "llm_endpoint": RAG_OLLAMA_URL,
+        "provider": RAG_PROVIDER,
+        "chat_model": RAG_CHAT_MODEL,
+        "embed_model": RAG_EMBED_MODEL,
+        "fallback_enabled": RAG_FALLBACK_ENABLED,
+        "fallback_provider": RAG_FALLBACK_PROVIDER if RAG_FALLBACK_ENABLED else None,
+        "fallback_model": RAG_FALLBACK_MODEL if RAG_FALLBACK_ENABLED else None,
+        "chat_timeout": CHAT_READ_T,
+        "embed_timeout": EMB_READ_T,
+        "top_k": DEFAULT_TOP_K,
+        "pack_top": DEFAULT_PACK_TOP,
+        "threshold": DEFAULT_THRESHOLD,
+        "ctx_budget": get_context_budget(),
+        "ctx_window": get_context_window(),
+    }
+
+    return {
+        "valid": len(errors) == 0,
+        "warnings": warnings,
+        "errors": errors,
+        "config_snapshot": config_snapshot,
+    }

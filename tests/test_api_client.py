@@ -6,6 +6,7 @@ import requests
 from clockify_rag.api_client import (
     MockLLMClient,
     OllamaAPIClient,
+    GptOssAPIClient,
     get_llm_client,
     set_llm_client,
     reset_llm_client,
@@ -160,3 +161,116 @@ def test_embedding_success_returns_expected_vector(monkeypatch):
 
     vec = client.create_embedding("text needing embedding")
     assert vec == [1.0, 2.0]
+
+
+# ====== GPT-OSS-20B Tests ======
+
+
+def test_gpt_oss_client_uses_correct_model_defaults(monkeypatch):
+    """Verify GptOssAPIClient uses gpt-oss-20b as default model."""
+    monkeypatch.setattr("clockify_rag.api_client.RAG_GPT_OSS_MODEL", "gpt-oss-20b")
+    monkeypatch.setattr("clockify_rag.api_client.RAG_GPT_OSS_CHAT_TIMEOUT", 180.0)
+    dummy_session = DummySession([])
+    monkeypatch.setattr("clockify_rag.api_client.get_session", lambda **kwargs: dummy_session)
+
+    client = GptOssAPIClient(base_url="http://fake-host:11434")
+
+    assert client.gen_model == "gpt-oss-20b"
+    assert client.chat_read_timeout == 180.0  # Increased timeout for reasoning
+
+
+def test_gpt_oss_client_uses_correct_sampling_defaults(monkeypatch):
+    """Verify GptOssAPIClient uses temperature=1.0, top_p=1.0, num_ctx=128000."""
+    monkeypatch.setattr("clockify_rag.api_client.RAG_GPT_OSS_MODEL", "gpt-oss-20b")
+    monkeypatch.setattr("clockify_rag.api_client.RAG_GPT_OSS_TEMPERATURE", 1.0)
+    monkeypatch.setattr("clockify_rag.api_client.RAG_GPT_OSS_TOP_P", 1.0)
+    monkeypatch.setattr("clockify_rag.api_client.RAG_GPT_OSS_CTX_WINDOW", 128000)
+    monkeypatch.setattr("clockify_rag.api_client.RAG_GPT_OSS_CHAT_TIMEOUT", 180.0)
+    monkeypatch.setattr("clockify_rag.api_client.DEFAULT_SEED", 42)
+    monkeypatch.setattr("clockify_rag.api_client.DEFAULT_NUM_PREDICT", 512)
+
+    dummy_session = DummySession(
+        [
+            DummyResponse(
+                {
+                    "model": "gpt-oss-20b",
+                    "message": {"role": "assistant", "content": "test response"},
+                    "done": True,
+                }
+            )
+        ]
+    )
+    monkeypatch.setattr("clockify_rag.api_client.get_session", lambda **kwargs: dummy_session)
+
+    client = GptOssAPIClient(base_url="http://fake-host:11434")
+    client.chat_completion(messages=[{"role": "user", "content": "test"}])
+
+    # Verify the POST call included gpt-oss-specific options
+    assert len(dummy_session.post_calls) == 1
+    call = dummy_session.post_calls[0]
+    options = call["json"]["options"]
+
+    assert options["temperature"] == 1.0  # OpenAI's default (vs 0.0 for qwen)
+    assert options["top_p"] == 1.0  # OpenAI's default (vs 0.9 for qwen)
+    assert options["num_ctx"] == 128000  # 128k context (vs 32768 for qwen)
+    assert options["seed"] == 42
+    assert options["num_predict"] == 512
+
+
+def test_get_llm_client_returns_gpt_oss_when_provider_is_gpt_oss(monkeypatch):
+    """Verify get_llm_client() returns GptOssAPIClient when RAG_PROVIDER=gpt-oss."""
+    monkeypatch.setattr("clockify_rag.api_client.RAG_PROVIDER", "gpt-oss")
+    monkeypatch.setattr("clockify_rag.api_client.RAG_GPT_OSS_MODEL", "gpt-oss-20b")
+    monkeypatch.setattr("clockify_rag.api_client.RAG_GPT_OSS_CHAT_TIMEOUT", 180.0)
+    dummy_session = DummySession([])
+    monkeypatch.setattr("clockify_rag.api_client.get_session", lambda **kwargs: dummy_session)
+
+    reset_llm_client()  # Clear any cached client
+    try:
+        client = get_llm_client()
+        assert isinstance(client, GptOssAPIClient)
+        assert client.gen_model == "gpt-oss-20b"
+    finally:
+        reset_llm_client()
+
+
+def test_get_llm_client_returns_ollama_when_provider_is_ollama(monkeypatch):
+    """Verify get_llm_client() returns OllamaAPIClient when RAG_PROVIDER=ollama (default)."""
+    monkeypatch.setattr("clockify_rag.api_client.RAG_PROVIDER", "ollama")
+    monkeypatch.setattr("clockify_rag.api_client.RAG_CHAT_MODEL", "qwen2.5:32b")
+    dummy_session = DummySession([])
+    monkeypatch.setattr("clockify_rag.api_client.get_session", lambda **kwargs: dummy_session)
+
+    reset_llm_client()
+    try:
+        client = get_llm_client()
+        assert isinstance(client, OllamaAPIClient)
+        assert not isinstance(client, GptOssAPIClient)  # Should not be the subclass
+    finally:
+        reset_llm_client()
+
+
+def test_context_budget_selection_for_gpt_oss(monkeypatch):
+    """Verify get_context_budget() returns 16k for gpt-oss, 12k for ollama."""
+    # Test GPT-OSS
+    monkeypatch.setattr("clockify_rag.config.RAG_PROVIDER", "gpt-oss")
+    monkeypatch.setattr("clockify_rag.config.RAG_GPT_OSS_CTX_BUDGET", 16000)
+    assert config.get_context_budget() == 16000
+
+    # Test Ollama
+    monkeypatch.setattr("clockify_rag.config.RAG_PROVIDER", "ollama")
+    monkeypatch.setattr("clockify_rag.config.CTX_TOKEN_BUDGET", 12000)
+    assert config.get_context_budget() == 12000
+
+
+def test_context_window_selection_for_gpt_oss(monkeypatch):
+    """Verify get_context_window() returns 128k for gpt-oss, 32k for ollama."""
+    # Test GPT-OSS
+    monkeypatch.setattr("clockify_rag.config.RAG_PROVIDER", "gpt-oss")
+    monkeypatch.setattr("clockify_rag.config.RAG_GPT_OSS_CTX_WINDOW", 128000)
+    assert config.get_context_window() == 128000
+
+    # Test Ollama
+    monkeypatch.setattr("clockify_rag.config.RAG_PROVIDER", "ollama")
+    monkeypatch.setattr("clockify_rag.config.DEFAULT_NUM_CTX", 32768)
+    assert config.get_context_window() == 32768

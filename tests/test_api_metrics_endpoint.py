@@ -60,7 +60,7 @@ def patched_pipeline(monkeypatch, sample_chunks, sample_embeddings, sample_bm25)
         # First call succeeds, second call forces a refusal
         return coverage_calls["count"] == 1
 
-    def fake_pack_snippets(chunks, selected, pack_top=8, num_ctx=2048):
+    def fake_pack_snippets(chunks, selected, pack_top=8, num_ctx=2048, **kwargs):
         packed_ids = [chunks[idx]["id"] for idx in selected[:pack_top]]
         return "context", packed_ids, 42
 

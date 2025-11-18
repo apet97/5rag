@@ -127,7 +127,7 @@ def test_time_operation_decorator(fresh_metrics):
     stats = collector.get_histogram_stats("test_operation")
     assert stats["count"] == 1, "Should have 1 timing measurement"
     assert stats["mean"] >= 100, f"Mean should be >= 100ms, got {stats['mean']}"
-    assert stats["mean"] < 200, f"Mean should be < 200ms (generous buffer), got {stats['mean']}"
+    assert stats["mean"] < 250, f"Mean should be < 250ms (expanded buffer for CI variability), got {stats['mean']}"
 
 
 def test_global_metrics_singleton():

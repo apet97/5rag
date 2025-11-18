@@ -32,6 +32,7 @@ from .config import (
     REFUSAL_STR,
     STRICT_CITATIONS,
     get_llm_client_mode,
+    get_context_budget,
 )
 from .retrieval import (
     retrieve,
@@ -441,8 +442,12 @@ def answer_once(
         retries=retries,
     )
 
-    # Pack snippets
-    context_block, packed_ids, used_tokens = pack_snippets(chunks, mmr_selected, pack_top=pack_top, num_ctx=num_ctx)
+    # Pack snippets with provider-specific budget
+    # GPT-OSS uses 16k token budget (vs 12k for qwen) to leverage 128k context window
+    budget_tokens = get_context_budget()
+    context_block, packed_ids, used_tokens = pack_snippets(
+        chunks, mmr_selected, pack_top=pack_top, budget_tokens=budget_tokens, num_ctx=num_ctx
+    )
 
     def _llm_failure(reason: str, error: Exception) -> Dict[str, Any]:
         total_time = time.time() - t_start

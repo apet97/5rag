@@ -184,7 +184,9 @@ def handle_api_call_errors(func):
             logger.error(error_msg)
             raise
         except Exception as e:
-            error_msg = format_error_message("API_ERROR", f"API call failed: {str(e)}", "check API endpoint and credentials")
+            error_msg = format_error_message(
+                "API_ERROR", f"API call failed: {str(e)}", "check API endpoint and credentials"
+            )
             logger.error(error_msg)
             raise
 

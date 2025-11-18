@@ -34,6 +34,13 @@ shim.log
 venv/
 *.bak
 
+# Logs
+logs/
+*.log
+
+# Internal documentation (archived)
+docs/archive/
+
 # OS
 .DS_Store
 .swp

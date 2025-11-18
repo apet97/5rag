@@ -27,6 +27,7 @@ from .exceptions import LLMError, ValidationError
 from .indexing import bm25_scores, get_faiss_index
 from .utils import tokenize  # FIX (Error #17): Import tokenize from utils instead of duplicating
 from .intent_classification import classify_intent, get_intent_metadata, adjust_scores_by_intent
+
 logger = logging.getLogger(__name__)
 
 # ====== RETRIEVAL PROFILING ======

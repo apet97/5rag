@@ -163,12 +163,15 @@ def doctor(
             "dependencies": get_dependency_info(),
             "index": get_index_info(),
             "config": {
+                "provider": config.RAG_PROVIDER,
                 "ollama_url": config.RAG_OLLAMA_URL,
                 "gen_model": config.RAG_CHAT_MODEL,
                 "emb_model": config.RAG_EMBED_MODEL,
                 "chunk_size": config.CHUNK_CHARS,
                 "top_k": config.DEFAULT_TOP_K,
                 "pack_top": config.DEFAULT_PACK_TOP,
+                "context_budget": config.get_context_budget(),
+                "context_window": config.get_context_window(),
             },
         }
 
@@ -239,11 +242,26 @@ def doctor(
     console.print()
 
     # Configuration Summary
-    config_table = Table(title="⚙️ Configuration", show_header=False)
+    provider = config.RAG_PROVIDER
+    provider_emoji = "🧠" if provider == "gpt-oss" else "🦙"
+    config_table = Table(title=f"{provider_emoji} Configuration ({provider.upper()})", show_header=False)
     config_table.add_column("Key", style="cyan")
     config_table.add_column("Value", style="white")
+    config_table.add_row("Provider", provider.upper())
     config_table.add_row("Ollama URL", config.RAG_OLLAMA_URL)
-    config_table.add_row("Generation Model", config.RAG_CHAT_MODEL)
+
+    # Provider-specific model display
+    if provider == "gpt-oss":
+        config_table.add_row("Generation Model", f"{config.RAG_GPT_OSS_MODEL} (GPT-OSS-20B)")
+        config_table.add_row("Temperature", f"{config.RAG_GPT_OSS_TEMPERATURE}")
+        config_table.add_row("Top-P", f"{config.RAG_GPT_OSS_TOP_P}")
+        config_table.add_row("Context Window", f"{config.RAG_GPT_OSS_CTX_WINDOW:,} tokens (128k)")
+        config_table.add_row("Context Budget", f"{config.RAG_GPT_OSS_CTX_BUDGET:,} tokens")
+    else:
+        config_table.add_row("Generation Model", config.RAG_CHAT_MODEL)
+        config_table.add_row("Context Window", f"{config.DEFAULT_NUM_CTX:,} tokens")
+        config_table.add_row("Context Budget", f"{config.CTX_TOKEN_BUDGET:,} tokens")
+
     config_table.add_row("Embedding Model", config.RAG_EMBED_MODEL)
     config_table.add_row("Chunk Size", str(config.CHUNK_CHARS))
     config_table.add_row("Top-K Retrieval", str(config.DEFAULT_TOP_K))
