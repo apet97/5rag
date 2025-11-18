@@ -98,13 +98,11 @@ make eval-gate            # Retrieval quality thresholds (MRR/NDCG)
 **Core Guides:**
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) – System design and data flow
 - [docs/CONFIGURATION.md](docs/CONFIGURATION.md) – Complete config reference
-- [docs/RUNBOOK.md](docs/RUNBOOK.md) – Operations guide (build, deploy, troubleshoot)
-- [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) – Production deployment guide
+- [docs/internals/RUNBOOK.md](docs/internals/RUNBOOK.md) – Operations guide (build, deploy, troubleshoot)
 
 **Development:**
-- [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) – Dev setup, tests, formatting, CI
-- [docs/TESTING.md](docs/TESTING.md) – Testing guide and best practices
-- [docs/API.md](docs/API.md) – HTTP API documentation
+- [docs/internals/TESTING.md](docs/internals/TESTING.md) – Testing guide and best practices
+- [docs/internals/API.md](docs/internals/API.md) – HTTP API documentation
 
 **Platform-Specific:**
 - [docs/platform/M1_COMPATIBILITY.md](docs/platform/M1_COMPATIBILITY.md) – Apple Silicon guide
@@ -112,7 +110,7 @@ make eval-gate            # Retrieval quality thresholds (MRR/NDCG)
 
 **Reference:**
 - [CLAUDE.md](CLAUDE.md) – Claude Code assistant instructions
-- [docs/PROJECT_STRUCTURE.md](docs/reference/PROJECT_STRUCTURE.md) – Codebase structure
+- [docs/reference/PROJECT_STRUCTURE.md](docs/reference/PROJECT_STRUCTURE.md) – Codebase structure
 - [docs/reference/FAQ_CACHE_USAGE.md](docs/reference/FAQ_CACHE_USAGE.md) – Cache usage FAQ
 
 ## 🛡️ Automatic LLM Fallback
@@ -215,7 +213,7 @@ uvicorn app:app --workers 4
 - Latency metrics (retrieval, LLM, total)
 - Retrieval quality metrics (MRR, NDCG, Precision)
 
-See [docs/OPERATIONS.md](docs/OPERATIONS.md) for operational guidance.
+See [docs/internals/OPERATIONS.md](docs/internals/OPERATIONS.md) for operational guidance.
 
 ## Support & Troubleshooting
 
@@ -240,7 +238,7 @@ python3 clockify_support_cli_final.py --selftest
 ```
 
 For more help, see:
-- [docs/RUNBOOK.md](docs/RUNBOOK.md) – Operations and troubleshooting
+- [docs/internals/RUNBOOK.md](docs/internals/RUNBOOK.md) – Operations and troubleshooting
 - [docs/platform/M1_COMPATIBILITY.md](docs/platform/M1_COMPATIBILITY.md) – M1-specific issues
 - [docs/reference/FAQ_CACHE_USAGE.md](docs/reference/FAQ_CACHE_USAGE.md) – Caching FAQ
 

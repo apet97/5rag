@@ -274,11 +274,11 @@ pip install --force-reinstall -e '.[dev]'
 
 ## 📚 Next Steps
 
-- **Production deployment**: See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
-- **Mac M1 technical details**: See [docs/M1_COMPATIBILITY.md](docs/M1_COMPATIBILITY.md)
+- **Mac M1 technical details**: See [docs/platform/M1_COMPATIBILITY.md](docs/platform/M1_COMPATIBILITY.md)
 - **Configuration reference**: See [docs/CONFIGURATION.md](docs/CONFIGURATION.md)
-- **API documentation**: See [docs/API.md](docs/API.md)
-- **Testing guide**: See [docs/TESTING.md](docs/TESTING.md)
+- **API documentation**: See [docs/internals/API.md](docs/internals/API.md)
+- **Testing guide**: See [docs/internals/TESTING.md](docs/internals/TESTING.md)
+- **Operations guide**: See [docs/internals/OPERATIONS.md](docs/internals/OPERATIONS.md)
 
 ---
 

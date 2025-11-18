@@ -489,7 +489,7 @@ class MyRetriever(RetrieverPlugin):
 register_plugin(MyRetriever())
 ```
 
-See [docs/PLUGIN_GUIDE.md](PLUGIN_GUIDE.md) for complete plugin documentation.
+See [internals/PLUGIN_GUIDE.md](internals/PLUGIN_GUIDE.md) for complete plugin documentation.
 
 ## Testing Strategy
 
@@ -511,7 +511,7 @@ See [docs/PLUGIN_GUIDE.md](PLUGIN_GUIDE.md) for complete plugin documentation.
 - Single query
 - Doctor diagnostics
 
-See [docs/TESTING.md](TESTING.md) for complete testing guide.
+See [internals/TESTING.md](internals/TESTING.md) for complete testing guide.
 
 ## Deployment & Operations
 
@@ -519,9 +519,9 @@ See [docs/TESTING.md](TESTING.md) for complete testing guide.
 
 **Dockerfile**: Multi-stage production image (installs package, copies artifacts, exposes uvicorn)
 
-**Runbooks**: [docs/RUNBOOK.md](RUNBOOK.md) covers health checks, log paths, rebuild steps, connectivity verification
+**Runbooks**: [internals/RUNBOOK.md](internals/RUNBOOK.md) covers health checks, log paths, rebuild steps, connectivity verification
 
-**Platform Notes**: [docs/DEPLOYMENT.md](DEPLOYMENT.md) captures Apple Silicon vs linux/amd64 specifics, environment variables, mock vs real LLM clients
+**Platform Notes**: See [platform/M1_COMPATIBILITY.md](platform/M1_COMPATIBILITY.md) for Apple Silicon specifics and [internals/OPERATIONS.md](internals/OPERATIONS.md) for deployment guidance
 
 ---
 
