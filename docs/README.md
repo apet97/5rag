@@ -149,7 +149,7 @@ Knowledge Base (markdown)
 
 ## 🔧 Configuration
 
-See [docs/CONFIG.md](CONFIG.md) for detailed parameter documentation.
+See [CONFIGURATION.md](CONFIGURATION.md) for detailed parameter documentation.
 
 Key environment variables:
 - `RAG_OLLAMA_URL`: Ollama service URL (default: http://10.127.0.192:11434; override to http://127.0.0.1:11434 locally)
@@ -159,15 +159,45 @@ Key environment variables:
 - `DEFAULT_PACK_TOP`: Final context chunks (default: 8)
 - `DEFAULT_THRESHOLD`: Minimum similarity (default: 0.25)
 
-## 📚 Documentation
+## 📚 Documentation Index
+
+### Core Guides
 
 | Document | Purpose |
 |----------|---------|
-| [INSTALL_macOS_ARM64.md](INSTALL_macOS_ARM64.md) | Apple Silicon setup guide |
-| [CONFIG.md](CONFIG.md) | All configuration options |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | System design and components |
-| [API.md](API.md) | REST API reference |
-| [OPERATIONS.md](OPERATIONS.md) | Deployment and monitoring |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | System design, components, and data flow |
+| [CONFIGURATION.md](CONFIGURATION.md) | Complete configuration reference |
+
+### Platform-Specific
+
+| Document | Purpose |
+|----------|---------|
+| [platform/M1_COMPATIBILITY.md](platform/M1_COMPATIBILITY.md) | Apple Silicon compatibility guide |
+| [platform/INSTALL_macOS_ARM64.md](platform/INSTALL_macOS_ARM64.md) | Detailed macOS ARM64 installation |
+
+### Internals & Operations
+
+| Document | Purpose |
+|----------|---------|
+| [internals/API.md](internals/API.md) | REST API reference and endpoints |
+| [internals/OPERATIONS.md](internals/OPERATIONS.md) | Deployment and monitoring guide |
+| [internals/RUNBOOK.md](internals/RUNBOOK.md) | Operations runbook |
+| [internals/TESTING.md](internals/TESTING.md) | Testing guide and best practices |
+| [internals/PRODUCTION_GUIDE.md](internals/PRODUCTION_GUIDE.md) | Production deployment checklist |
+| [internals/PLUGIN_GUIDE.md](internals/PLUGIN_GUIDE.md) | Plugin system documentation |
+| [internals/LOGGING_CONFIG.md](internals/LOGGING_CONFIG.md) | Logging configuration |
+| [internals/ERROR_HANDLING.md](internals/ERROR_HANDLING.md) | Error handling patterns |
+| [internals/CHUNKING.md](internals/CHUNKING.md) | Chunking strategy details |
+| [internals/INGESTION.md](internals/INGESTION.md) | Document ingestion pipeline |
+| [internals/EVALUATION.md](internals/EVALUATION.md) | Retrieval quality metrics |
+| [internals/RAG_PROD_CHECKLIST.md](internals/RAG_PROD_CHECKLIST.md) | Production readiness checklist |
+
+### Reference
+
+| Document | Purpose |
+|----------|---------|
+| [reference/PROJECT_STRUCTURE.md](reference/PROJECT_STRUCTURE.md) | Codebase structure and file organization |
+| [reference/FAQ_CACHE_USAGE.md](reference/FAQ_CACHE_USAGE.md) | Caching system FAQ |
 
 ## 🐳 Docker
 
@@ -330,4 +360,4 @@ MIT License - See LICENSE file
 
 ---
 
-**Ready to get started?** Follow the [Quick Start](#-quick-start-90-seconds) above or read [INSTALL_macOS_ARM64.md](INSTALL_macOS_ARM64.md) for detailed instructions.
+**Ready to get started?** Follow the [Quick Start](#-quick-start-90-seconds) above or read [platform/INSTALL_macOS_ARM64.md](platform/INSTALL_macOS_ARM64.md) for detailed instructions.
