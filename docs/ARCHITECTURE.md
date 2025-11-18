@@ -1,34 +1,64 @@
 # System Architecture
 
-High-level overview of the Clockify RAG system design, components, and data flow.
+High-level overview of the Clockify RAG system design, components, and data flow. Use this as the single source of truth for understanding how data moves through the system, component responsibilities, and external dependencies.
+
+## Table of Contents
+
+- [Architecture Snapshot](#architecture-snapshot)
+- [High-Level Responsibilities](#high-level-responsibilities)
+- [Data Flow](#data-flow)
+- [Component Details](#component-details)
+- [External Services](#external-services)
+- [Artifacts & Storage](#artifacts--storage)
+- [Performance Characteristics](#performance-characteristics)
+- [Extension Points](#extension-points)
+- [Testing Strategy](#testing-strategy)
 
 ## Architecture Snapshot
 
-- **Entry points**: `ragctl` Typer CLI (doctor/ingest/query/chat), FastAPI server (`clockify_rag.api:app`), and automation scripts (`scripts/smoke_rag.py`, `eval.py`). Legacy `clockify_support_cli_final.py` still works but wraps the same modules.
-- **Central configuration**: `clockify_rag/config.py` loads defaults, `.env`, and runtime overrides (see `docs/CONFIGURATION.md`). All URLs, model names, timeouts, and artifact paths flow through this module.
-- **Artifacts**: `chunks.jsonl`, `vecs_n.npy`, `bm25.json`, `faiss.index`, and `index.meta.json` live beside the repository and are rebuilt deterministically via `ragctl ingest`.
-- **External services**: 
-  - Ollama-compatible endpoint at `http://10.127.0.192:11434` (default, overridable) for `/api/chat` and `/api/embeddings`.
-  - Local filesystem for corpus Markdown and index artifacts.
-  - Optional FAISS/HNSW libraries for ANN retrieval (falls back to BM25-only mode when unavailable).
+**Entry Points:**
+- `ragctl` Typer CLI (doctor/ingest/query/chat)
+- FastAPI server (`clockify_rag.api:app`)
+- Automation scripts (`scripts/smoke_rag.py`, `eval.py`)
+- Legacy: `clockify_support_cli_final.py` (wraps same modules)
 
-## Data Flow at a Glance
+**Central Configuration:**
+- `clockify_rag/config.py` loads defaults, `.env`, and runtime overrides
+- All URLs, model names, timeouts, and artifact paths flow through this module
+- See [docs/CONFIGURATION.md](CONFIGURATION.md) for complete reference
 
-1. **Source acquisition** – Markdown, HTML, PDF, DOCX, or CSV files are normalized via `clockify_rag.ingestion`.
-2. **Chunking** – `clockify_rag.chunking.build_chunks` parses documents, enforces size/overlap, and emits deterministic IDs plus metadata (title, URL, section).
-3. **Embedding** – `clockify_rag.embedding.embed_texts` either calls SentenceTransformers locally (`EMB_BACKEND=local`) or the Ollama embedding endpoint (`EMB_BACKEND=ollama`) with retries + caching.
-4. **Indexing** – `clockify_rag.indexing.build` persists FAISS/HNSW indexes alongside BM25 term statistics and stores build metadata for change detection.
-5. **Retrieval** – `clockify_rag.retrieval.retrieve` embeds the query, runs dense + BM25 search, blends scores (alpha/intent aware), and applies MMR diversification.
-6. **Prompt assembly** – `clockify_rag.retrieval.pack_snippets` enforces the configured token budget, formats snippets with IDs/titles, and tracks token consumption.
-7. **Generation** – `clockify_rag.retrieval.ask_llm` and `clockify_rag.answer.answer_once` call the Ollama client, validate JSON, log routing/metrics, and optionally rerank context via LLM or cross-encoder.
-8. **Outputs** – Results surface through the CLI/API with structured metadata (timing, routing, citations) and are logged to `rag_queries.jsonl` when enabled.
+**Artifacts:**
+- `chunks.jsonl`, `vecs_n.npy`, `bm25.json`, `faiss.index`, `index.meta.json`
+- Live beside the repository, rebuilt deterministically via `ragctl ingest`
 
-## High-Level Pipeline
+**External Services:**
+- Ollama-compatible endpoint at `http://10.127.0.192:11434` (default, overridable)
+- Local filesystem for corpus Markdown and index artifacts
+- Optional FAISS/HNSW libraries for ANN retrieval (falls back to BM25-only when unavailable)
+
+## High-Level Responsibilities
+
+| Stage | Responsibility | Key Modules / Files |
+|-------|----------------|---------------------|
+| **Ingestion & Normalization** | Convert Markdown/HTML/PDF/txt/docx sources into normalized Markdown following `# [ARTICLE]` convention | `clockify_rag/ingestion.py`, `knowledge_full.md`, [docs/internals/INGESTION.md](internals/INGESTION.md) |
+| **Chunking** | Parse Markdown articles, split by headings/sentences with overlap, emit normalized chunks with stable IDs | `clockify_rag/chunking.py`, [docs/internals/CHUNKING.md](internals/CHUNKING.md) |
+| **Embedding Layer** | Produce semantic vectors using local SentenceTransformers (default) or Ollama endpoint. Handles batching, retries, caching | `clockify_rag/embedding.py`, `emb_cache.jsonl` |
+| **Vector & Lexical Indexes** | Maintain FAISS IVFFlat (primary), HNSW (fallback), and BM25 sparse indexes | `clockify_rag/indexing.py`, index artifacts |
+| **Retriever & Reranker** | Execute BM25 + dense dual retrieval, reciprocal-rank fusion, intent-aware weighting, optional LLM reranking, MMR diversification | `clockify_rag/retrieval.py`, `clockify_rag/intent_classification.py` |
+| **Answer Orchestration** | Drive end-to-end `answer_once` flow: validation, caching, retrieval, reranking, prompt construction, LLM call, citation validation | `clockify_rag/answer.py`, `clockify_rag/caching.py`, `clockify_rag/error_handlers.py` |
+| **LLM Client Abstraction** | Unified Ollama client with retries/timeouts plus deterministic mock for tests/CI (`RAG_LLM_CLIENT=mock`) | `clockify_rag/api_client.py` |
+| **APIs & CLIs** | Expose FastAPI endpoints, Typer-powered CLI (`ragctl`), and legacy wrappers | `clockify_rag/api.py`, `clockify_rag/cli_modern.py`, `clockify_support_cli_final.py`, `Makefile` |
+| **Observability** | Structured logging plus in-process metrics (counters, gauges, histograms) | `clockify_rag/logging_config.py`, `clockify_rag/metrics.py`, [docs/internals/LOGGING_CONFIG.md](internals/LOGGING_CONFIG.md) |
+| **Evaluation** | Offline retrieval evaluation via `eval.py`, RAGAS integration, datasets under `eval_datasets/` | `eval.py`, [docs/EVALUATION.md](EVALUATION.md) |
+
+## Data Flow
+
+### High-Level Pipeline
 
 ```
-Knowledge Base (Markdown)
+Source Docs (Markdown/HTML/PDF)
         ↓
-   Ingestion
+   Ingestion (normalize to Markdown)
         ↓
    Chunking (semantic splits)
         ↓
@@ -53,7 +83,101 @@ Knowledge Base (Markdown)
         User
 ```
 
-## Component Overview
+### Detailed Data Flow
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    User Query (CLI/API)                     │
+└────────────────────────┬────────────────────────────────────┘
+                         │
+                         ▼
+            ┌────────────────────────┐
+            │  Query Caching Layer   │◄──Cache Hit? Return
+            │  (LRU + Disk)          │
+            └────────┬───────────────┘
+                     │
+                     ▼
+          ┌──────────────────────────┐
+          │   Embed Question         │
+          │   (SentenceTransformer)  │
+          └────────┬─────────────────┘
+                   │
+       ┌───────────┴───────────┐
+       │                       │
+       ▼                       ▼
+┌─────────────────┐   ┌──────────────────┐
+│  BM25 Retrieval │   │ Dense Retrieval  │
+│  (Keyword)      │   │ (Vector ANN)     │
+└────────┬────────┘   └─────────┬────────┘
+         │                      │
+         └──────────┬───────────┘
+                    │
+                    ▼
+         ┌──────────────────────┐
+         │ Hybrid Fusion (RRF)  │
+         │ alpha * bm25 +       │
+         │ (1-alpha) * dense    │
+         └──────────┬────────────┘
+                    │
+                    ▼
+         ┌──────────────────────┐
+         │ MMR Reranking        │
+         │ (Avoid Redundancy)   │
+         └──────────┬────────────┘
+                    │
+                    ▼
+         ┌──────────────────────┐
+         │ Pack Snippets        │
+         │ Format for LLM       │
+         │ Token Budget Check   │
+         └──────────┬────────────┘
+                    │
+                    ▼
+         ┌──────────────────────┐
+         │ LLM Inference        │
+         │ (Ollama/OpenAI)      │
+         └──────────┬────────────┘
+                    │
+                    ▼
+         ┌──────────────────────┐
+         │ Extract Citations    │
+         │ Confidence Scoring   │
+         └──────────┬────────────┘
+                    │
+                    ▼
+            ┌─────────────────┐
+            │  Log Query      │
+            │  (JSONL file)   │
+            └────────┬────────┘
+                     │
+                     ▼
+          ┌──────────────────────┐
+          │  Return Answer       │
+          │  + Citations         │
+          │  + Confidence        │
+          └──────────────────────┘
+```
+
+### Execution Flow (Single Query)
+
+1. User enters question
+2. Check query cache → hit → return cached answer
+3. Embed question with SentenceTransformer
+4. **Parallel:**
+   - BM25 retrieval (top 15 chunks by keywords)
+   - FAISS/HNSW retrieval (top 15 chunks by vector similarity)
+5. Fuse results (reciprocal rank fusion with alpha weighting)
+6. Apply MMR (remove redundant chunks)
+7. Filter by threshold (≥0.25 similarity)
+8. Pack snippets (format + estimate tokens)
+9. Call LLM with context window ≤12000 tokens
+10. Extract citations from generated answer
+11. Score confidence
+12. Cache result
+13. Log query (optional)
+14. Return answer + sources + confidence
+
+## Component Details
 
 ### 1. Ingestion & Chunking
 
@@ -108,27 +232,20 @@ except:
 
 #### FAISS (Primary)
 - **Index Type**: IVFFlat
-- **Parameters**:
-  - `nlist` = 64 (M1 for stability) or 256 (x86)
-  - `nprobe` = 16 (clusters to search)
+- **Parameters**: `nlist=64` (M1 stability) or `256` (x86), `nprobe=16`
 - **Speed**: <10ms per query
 - **Memory**: ~100MB for 1000 chunks
 - **Files**: `faiss.index`
 
 #### HNSW (Fallback)
 - **Type**: Hierarchical Navigable Small World
-- **Parameters**:
-  - `m` = 16 (neighbors per node)
-  - `ef_construction` = 200
+- **Parameters**: `m=16`, `ef_construction=200`
 - **Speed**: 20-50ms per query
-- **Memory**: More than FAISS
 - **Files**: `hnsw_cosine.bin`
 
 #### BM25 (Last Resort)
 - **Type**: Okapi BM25 (classic TF-IDF variant)
-- **Parameters**:
-  - `k1` = 1.2 (term saturation)
-  - `b` = 0.65 (length normalization)
+- **Parameters**: `k1=1.2`, `b=0.65`
 - **Speed**: 50-200ms per query
 - **Memory**: <10MB
 - **Files**: `bm25.json`
@@ -139,26 +256,19 @@ except:
 
 **Steps**:
 
-1. **Query Embedding**
-   - Embed user question with same model as chunks
-   - Output: 768-dim vector
-
-2. **Dual Retrieval**
+1. **Query Embedding**: Embed question with same model as chunks → 768-dim vector
+2. **Dual Retrieval**:
    - BM25: Keyword matching → top_k results
    - Dense: Vector similarity → top_k results
-
-3. **Hybrid Fusion** (Reciprocal Rank Fusion)
+3. **Hybrid Fusion** (Reciprocal Rank Fusion):
    ```
    score = 1/(1 + bm25_rank) + 1/(1 + dense_rank)
    weighted = alpha * bm25_score + (1 - alpha) * dense_score
    ```
-
-4. **MMR Reranking** (Maximal Marginal Relevance)
-   - Avoid redundant/similar chunks
+4. **MMR Reranking** (Maximal Marginal Relevance):
    - Balance relevance vs diversity
    - Formula: `mmr_score = lambda * relevance - (1 - lambda) * similarity_to_selected`
-
-5. **Filtering**
+5. **Filtering**:
    - Keep chunks with score ≥ threshold
    - Limit to pack_top chunks
    - Check coverage (min 2 chunks)
@@ -189,9 +299,7 @@ Truncate if needed → Create context string
   - HTTP API to `OLLAMA_URL`
   - Model: `GEN_MODEL` (default: qwen2.5:32b)
   - Streaming support
-
-- **OpenAI**: External API (requires key)
-- **Anthropic**: External API (requires key)
+  - **Automatic Fallback**: `gpt-oss:20b` on connection/timeout/5xx errors
 
 **Prompt Format**:
 ```
@@ -219,7 +327,6 @@ If not in context, say: "I don't know based on the MD."
 
 **Rate Limiter** (optional):
 - Per-IP request limiting
-- Configurable: queries/minute
 - Token bucket algorithm
 
 ### 8. CLI & API
@@ -242,82 +349,45 @@ If not in context, say: "I don't know based on the MD."
 - `GET /v1/config` - Current config
 - `GET /v1/metrics` - Metrics
 
-## Data Flow Diagram
+## External Services
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                                                             │
-│                    User Query (CLI/API)                    │
-│                                                             │
-└────────────────────────┬────────────────────────────────────┘
-                         │
-                         ▼
-            ┌────────────────────────┐
-            │  Query Caching Layer   │◄──Cache Hit? Return
-            │  (LRU + Redis)         │
-            └────────┬───────────────┘
-                     │
-                     ▼
-          ┌──────────────────────────┐
-          │   Embed Question         │
-          │   (SentenceTransformer)  │
-          └────────┬─────────────────┘
-                   │
-       ┌───────────┴───────────┐
-       │                       │
-       ▼                       ▼
-┌─────────────────┐   ┌──────────────────┐
-│  BM25 Retrieval │   │ Dense Retrieval  │
-│  (Keyword)      │   │ (Vector ANN)     │
-└────────┬────────┘   └─────────┬────────┘
-         │                      │
-         └──────────┬───────────┘
-                    │
-                    ▼
-         ┌──────────────────────┐
-         │ Hybrid Fusion (RRF)   │
-         │ alpha * bm25 +        │
-         │ (1-alpha) * dense     │
-         └──────────┬────────────┘
-                    │
-                    ▼
-         ┌──────────────────────┐
-         │ MMR Reranking        │
-         │ (Avoid Redundancy)   │
-         └──────────┬────────────┘
-                    │
-                    ▼
-         ┌──────────────────────┐
-         │ Pack Snippets        │
-         │ Format for LLM       │
-         │ Token Budget Check   │
-         └──────────┬────────────┘
-                    │
-                    ▼
-         ┌──────────────────────┐
-         │ LLM Inference        │
-         │ (Ollama/OpenAI)      │
-         └──────────┬────────────┘
-                    │
-                    ▼
-         ┌──────────────────────┐
-         │ Extract Citations    │
-         │ Confidence Scoring   │
-         └──────────┬────────────┘
-                    │
-                    ▼
-            ┌─────────────────┐
-            │  Log Query      │
-            │  (JSONL file)   │
-            └────────┬────────┘
-                     │
-                     ▼
-          ┌──────────────────────┐
-          │  Return Answer       │
-          │  + Citations         │
-          │  + Confidence        │
-          └──────────────────────┘
-```
+**Ollama-compatible LLM host** (default: `http://10.127.0.192:11434`):
+- Chat/generation model: `qwen2.5:32b`
+- Embedding model: `nomic-embed-text:latest`
+- Fallback model: `gpt-oss:20b` (automatic on primary failure)
+- Accessible from company VPN (required for remote endpoint)
+- All network clients handle timeouts, retries, and are mockable for offline testing
+
+**Local storage**:
+- Vector artifacts (FAISS/HNSW/BM25)
+- Chunk metadata (`chunks.jsonl`, `meta.jsonl`)
+- Logs (`logs/`)
+- Caches (`emb_cache.jsonl`, `rag_queries.jsonl`)
+
+**Python runtime** (3.11+):
+- Optional Apple Silicon acceleration (PyTorch MPS)
+- FAISS wheels (conda for M1)
+- Docker support: linux/amd64 and linux/arm64
+
+## Environment Assumptions
+
+**Development**: macOS M1 Pro laptops with VPN access to remote Ollama host. Local runs default to mock LLM clients; setting `RAG_OLLAMA_URL` switches to real host.
+
+**Production**: Linux containers (amd64) managed by platform team. Containers mount persistent storage for indexes and expose FastAPI on port 8000.
+
+**Offline/CI**: Must succeed without network access. All tests and evaluation scripts default to mock LLM client and deterministic embeddings.
+
+## Artifacts & Storage
+
+| Artifact | Purpose | Generated by | Size (per 100 chunks) |
+|----------|---------|--------------|---------------------|
+| `chunks.jsonl` / `meta.jsonl` | Chunk metadata and helper fields | `clockify_rag.chunking.build_chunks` | 1-2 MB |
+| `vecs_n.npy` (`float32`) | Normalized dense embeddings | `clockify_rag.embedding.embed_texts` | 300 KB |
+| `bm25.json` | Sparse keyword index | `clockify_rag.indexing.build_bm25` | 100-200 KB |
+| `faiss.index` / `hnsw_cosine.bin` | ANN indexes for dense retrieval | `clockify_rag.indexing.build_faiss_index` | 1-2 MB |
+| `index.meta.json` | Versioning and checksum info | `clockify_rag.indexing.save_index_meta` | <1 KB |
+| `rag_queries.jsonl` | Structured query logs (redaction-aware) | `clockify_rag.caching.log_query` | Variable |
+| `logs/` | General application logs (JSON/text) | `clockify_rag.logging_config` | Variable |
 
 ## Module Dependencies
 
@@ -360,40 +430,6 @@ clockify_rag/
     Custom retrievers, rerankers
 ```
 
-## Execution Flow (Single Query)
-
-```
-1. User enters question
-   ↓
-2. Check query cache → hit → return cached answer
-   ↓
-3. Embed question with SentenceTransformer
-   ↓
-4. Parallel:
-   a) BM25 retrieval (top 15 chunks by keywords)
-   b) FAISS/HNSW retrieval (top 15 chunks by vector similarity)
-   ↓
-5. Fuse results (reciprocal rank fusion with alpha weighting)
-   ↓
-6. Apply MMR (remove redundant chunks)
-   ↓
-7. Filter by threshold (≥0.25 similarity)
-   ↓
-8. Pack snippets (format + estimate tokens)
-   ↓
-9. Call LLM with context window ≤12000 tokens
-   ↓
-10. Extract citations from generated answer
-    ↓
-11. Score confidence
-    ↓
-12. Cache result
-    ↓
-13. Log query (optional)
-    ↓
-14. Return answer + sources + confidence
-```
-
 ## Performance Characteristics
 
 ### Latency (M1 Pro, 16GB)
@@ -418,32 +454,20 @@ clockify_rag/
 | Cached queries (1000) | 50-100 MB |
 | **Total** | **500-1000 MB** |
 
-### Index Size
+### Scalability
 
-| Artifact | Size (per 100 chunks) |
-|----------|---------------------|
-| chunks.jsonl | 1-2 MB |
-| vecs_n.npy | 300 KB |
-| bm25.json | 100-200 KB |
-| faiss.index | 1-2 MB |
-| **Total** | **3-5 MB** |
-
-## Scalability
-
-### Maximum Practical Index Sizes
-
+**Maximum Practical Index Sizes:**
 - **Small** (0-1000 chunks): All backends ✅
 - **Medium** (1000-10000 chunks): FAISS + HNSW ✅, BM25 ✅
 - **Large** (10000-100000 chunks): FAISS ✅, HNSW ⚠️, BM25 ⚠️
 - **XLarge** (>100000 chunks): FAISS only (with sharding)
 
-### Optimization for Scale
-
-1. **Shard index**: Split by category/domain
-2. **Use cloud FAISS**: Vespa, Elasticsearch, Pinecone
-3. **Async embeddings**: Process in batches
-4. **Distributed LLM**: vLLM, Ray Serve
-5. **Caching**: Redis for multi-instance
+**Optimization for Scale:**
+1. Shard index by category/domain
+2. Use cloud FAISS (Vespa, Elasticsearch, Pinecone)
+3. Async embeddings in batches
+4. Distributed LLM (vLLM, Ray Serve)
+5. Redis for multi-instance caching
 
 ## Extension Points
 
@@ -465,28 +489,11 @@ class MyRetriever(RetrieverPlugin):
 register_plugin(MyRetriever())
 ```
 
-### Custom Rerankers
-
-```python
-class MyReranker(RerankerPlugin):
-    def rerank(self, question: str, candidates: list):
-        # Custom scoring
-        return sorted_candidates
-```
-
-### Custom Embedders
-
-```python
-class MyEmbedder(EmbedderPlugin):
-    def embed(self, texts: list[str]):
-        # Custom embeddings
-        return vectors
-```
+See [docs/PLUGIN_GUIDE.md](PLUGIN_GUIDE.md) for complete plugin documentation.
 
 ## Testing Strategy
 
-### Unit Tests (tests/)
-
+### Unit Tests (`tests/`)
 - Chunking logic
 - Embedding interfaces
 - BM25 ranking
@@ -494,31 +501,34 @@ class MyEmbedder(EmbedderPlugin):
 - Answer extraction
 
 ### Integration Tests
-
 - End-to-end ingestion
 - Retrieval pipeline
 - LLM inference
 - API endpoints
 
 ### Smoke Tests (CI)
-
 - Quick index build
 - Single query
 - Doctor diagnostics
 
-## Future Enhancements
+See [docs/TESTING.md](TESTING.md) for complete testing guide.
 
-1. **Cross-Encoder Reranking**: 15% accuracy boost (bge-reranker)
-2. **Hybrid Search v2**: Learning-to-rank instead of RRF
-3. **Knowledge Graph**: Entity linking + relationship retrieval
-4. **Long Context**: Support 100K+ token windows
-5. **Adaptive Routing**: Confidence-based escalation
-6. **Multi-Language**: Language detection + routing
-7. **Persistent Cache**: Redis backend for distributed systems
+## Deployment & Operations
+
+**Docker Compose**: `docker-compose.yml` launches FastAPI server plus optional local Ollama profile
+
+**Dockerfile**: Multi-stage production image (installs package, copies artifacts, exposes uvicorn)
+
+**Runbooks**: [docs/RUNBOOK.md](RUNBOOK.md) covers health checks, log paths, rebuild steps, connectivity verification
+
+**Platform Notes**: [docs/DEPLOYMENT.md](DEPLOYMENT.md) captures Apple Silicon vs linux/amd64 specifics, environment variables, mock vs real LLM clients
 
 ---
 
-For implementation details, see:
-- [README.md](README.md) - Quick start
-- [CONFIG.md](CONFIG.md) - Configuration options
-- [Source code](../clockify_rag/) - Actual implementation
+**Related Documentation:**
+- [README.md](../README.md) - Quick start and overview
+- [CONFIGURATION.md](CONFIGURATION.md) - Complete config reference
+- [RUNBOOK.md](RUNBOOK.md) - Operations guide
+- [DEPLOYMENT.md](DEPLOYMENT.md) - Production deployment
+
+**Keep this document updated** when architecture evolves (new ingestion sources, retrievers, or evaluation tooling). Changes that add new dependencies or external touchpoints must be reflected here before merging to `main`.
