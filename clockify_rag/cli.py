@@ -9,6 +9,7 @@ Extracted from clockify_support_cli_final.py to reduce file size and improve mod
 """
 
 import warnings
+
 warnings.warn("clockify_rag.cli is deprecated. Use ragctl instead.", DeprecationWarning, stacklevel=2)
 
 import argparse

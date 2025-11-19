@@ -488,7 +488,7 @@ RATE_LIMIT_WINDOW = _parse_env_int("RATE_LIMIT_WINDOW", 60, min_val=1, max_val=3
 API_HOST = _get_env_value("API_HOST", "127.0.0.1") or "127.0.0.1"
 API_PORT = _parse_env_int("API_PORT", 8000, min_val=1, max_val=65535)
 API_WORKERS = _parse_env_int("API_WORKERS", 4, min_val=1, max_val=64)
-CORS_ENABLED = _get_bool_env("CORS_ENABLED", "1") # Enabled by default
+CORS_ENABLED = _get_bool_env("CORS_ENABLED", "1")  # Enabled by default
 
 API_AUTH_MODE = (_get_env_value("API_AUTH_MODE", "none") or "none").strip().lower()
 _api_keys_raw = _get_env_value("API_ALLOWED_KEYS", "")

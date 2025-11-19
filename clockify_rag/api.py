@@ -61,6 +61,7 @@ class QueryRequest(BaseModel):
         Prevents XSS, injection attacks, and other malicious input.
         """
         from .utils import sanitize_question
+
         # Use utils.sanitize_question for consistent validation
         # Pass max_length matching the Field constraint
         return sanitize_question(v, max_length=10000)
@@ -200,8 +201,7 @@ def create_app() -> FastAPI:
 
         # Log request with ID
         logger.debug(
-            f"Request received | request_id={request_id} | "
-            f"method={request.method} | path={request.url.path}"
+            f"Request received | request_id={request_id} | " f"method={request.method} | path={request.url.path}"
         )
 
         # Process request

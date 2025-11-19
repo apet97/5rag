@@ -28,9 +28,10 @@ logger = logging.getLogger(__name__)
 
 # Allow CI smoke tests to bypass external services
 if os.environ.get("BENCHMARK_FAKE_REMOTE") == "1":
+
     def _fake_embed_query(question: str, retries: int = 0) -> np.ndarray:
         """Deterministic unit-vector embedding based on question hash."""
-        seed = abs(hash(question)) % (2 ** 32)
+        seed = abs(hash(question)) % (2**32)
         rng = np.random.default_rng(seed)
         vec = rng.normal(size=config.EMB_DIM).astype("float32")
         norm = np.linalg.norm(vec)
@@ -42,10 +43,23 @@ if os.environ.get("BENCHMARK_FAKE_REMOTE") == "1":
         vecs = [_fake_embed_query(t, retries) for t in texts]
         return np.vstack(vecs).astype("float32")
 
-    def _fake_answer_once(question, chunks, vecs_n, bm, top_k=12, pack_top=6,
-                          threshold=0.30, use_rerank=False, debug=False,
-                          hnsw=None, seed=0, num_ctx=0, num_predict=0,
-                          retries=0, faiss_index_path=None):
+    def _fake_answer_once(
+        question,
+        chunks,
+        vecs_n,
+        bm,
+        top_k=12,
+        pack_top=6,
+        threshold=0.30,
+        use_rerank=False,
+        debug=False,
+        hnsw=None,
+        seed=0,
+        num_ctx=0,
+        num_predict=0,
+        retries=0,
+        faiss_index_path=None,
+    ):
         """Offline-friendly answer stub using hybrid retrieval only."""
         selected, scores = retrieve(
             question, chunks, vecs_n, bm, top_k=top_k, hnsw=hnsw, retries=retries, faiss_index_path=faiss_index_path
@@ -180,8 +194,8 @@ def aggregate_retrieval_profiles(profiles: List[Dict]) -> Dict:
 def benchmark_embedding_single(chunks, iterations=10):
     """Benchmark single text embedding."""
     text = chunks[0]["text"] if chunks else "How do I track time in Clockify?"
-    
-    # Use fake if env var set (handled by module level check if we were monkey patching, 
+
+    # Use fake if env var set (handled by module level check if we were monkey patching,
     # but here we just use the imported function. If we want to support the fake remote
     # we need to swap the function being called)
     fn_to_call = _fake_embed_query if os.environ.get("BENCHMARK_FAKE_REMOTE") == "1" else embed_query
@@ -197,11 +211,8 @@ def benchmark_embedding_single(chunks, iterations=10):
 def benchmark_embedding_batch(chunks, iterations=5):
     """Benchmark batch embedding (10 chunks)."""
     batch = chunks[:10] if len(chunks) >= 10 else chunks
-    texts = [
-        c.get("text", str(c)) if isinstance(c, dict) else str(c)
-        for c in batch
-    ]
-    
+    texts = [c.get("text", str(c)) if isinstance(c, dict) else str(c) for c in batch]
+
     fn_to_call = _fake_embed_texts if os.environ.get("BENCHMARK_FAKE_REMOTE") == "1" else embed_texts
 
     def run():
@@ -215,11 +226,8 @@ def benchmark_embedding_batch(chunks, iterations=5):
 def benchmark_embedding_large_batch(chunks, iterations=3):
     """Benchmark large batch embedding (100 chunks)."""
     batch = chunks[:100] if len(chunks) >= 100 else chunks
-    texts = [
-        c.get("text", str(c)) if isinstance(c, dict) else str(c)
-        for c in batch
-    ]
-    
+    texts = [c.get("text", str(c)) if isinstance(c, dict) else str(c) for c in batch]
+
     fn_to_call = _fake_embed_texts if os.environ.get("BENCHMARK_FAKE_REMOTE") == "1" else embed_texts
 
     def run():
@@ -253,7 +261,9 @@ def benchmark_retrieval_with_mmr(chunks, vecs_n, bm, hnsw=None, faiss_index_path
     profiles = []
 
     def run():
-        selected, scores = retrieve(question, chunks, vecs_n, bm, top_k=12, hnsw=hnsw, faiss_index_path=faiss_index_path)
+        selected, scores = retrieve(
+            question, chunks, vecs_n, bm, top_k=12, hnsw=hnsw, faiss_index_path=faiss_index_path
+        )
         # Simulate MMR (already included in answer_once, but measure separately)
         _ = selected[:6]  # Pack top 6
         if RETRIEVE_PROFILE_LAST:
@@ -269,12 +279,22 @@ def benchmark_retrieval_with_mmr(chunks, vecs_n, bm, hnsw=None, faiss_index_path
 def benchmark_e2e_simple(chunks, vecs_n, bm, hnsw=None, faiss_index_path=None, iterations=10):
     """Benchmark end-to-end answer generation (simple query)."""
     question = "How do I track time?"
-    
+
     fn_to_call = _fake_answer_once if os.environ.get("BENCHMARK_FAKE_REMOTE") == "1" else answer_once
 
     def run():
         try:
-            fn_to_call(question, chunks, vecs_n, bm, top_k=12, pack_top=6, threshold=0.30, hnsw=hnsw, faiss_index_path=faiss_index_path)
+            fn_to_call(
+                question,
+                chunks,
+                vecs_n,
+                bm,
+                top_k=12,
+                pack_top=6,
+                threshold=0.30,
+                hnsw=hnsw,
+                faiss_index_path=faiss_index_path,
+            )
         except Exception as e:
             print(f"Warning: E2E benchmark failed: {e}")
 
@@ -286,12 +306,22 @@ def benchmark_e2e_simple(chunks, vecs_n, bm, hnsw=None, faiss_index_path=None, i
 def benchmark_e2e_complex(chunks, vecs_n, bm, hnsw=None, faiss_index_path=None, iterations=5):
     """Benchmark end-to-end answer generation (complex query)."""
     question = "What are the differences between the pricing plans and which features are included in each tier?"
-    
+
     fn_to_call = _fake_answer_once if os.environ.get("BENCHMARK_FAKE_REMOTE") == "1" else answer_once
 
     def run():
         try:
-            fn_to_call(question, chunks, vecs_n, bm, top_k=12, pack_top=6, threshold=0.30, hnsw=hnsw, faiss_index_path=faiss_index_path)
+            fn_to_call(
+                question,
+                chunks,
+                vecs_n,
+                bm,
+                top_k=12,
+                pack_top=6,
+                threshold=0.30,
+                hnsw=hnsw,
+                faiss_index_path=faiss_index_path,
+            )
         except Exception as e:
             print(f"Warning: E2E complex benchmark failed: {e}")
 

@@ -197,11 +197,7 @@ def handle_index_errors(func):
         try:
             return func(*args, **kwargs)
         except IndexLoadError as e:
-            logger.error(
-                format_error_message(
-                    "INDEX_ERROR", str(e), "run 'ragctl ingest' to rebuild"
-                )
-            )
+            logger.error(format_error_message("INDEX_ERROR", str(e), "run 'ragctl ingest' to rebuild"))
             raise
         except Exception as e:
             logger.error(

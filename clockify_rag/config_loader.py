@@ -15,6 +15,7 @@ from typing import Dict, Any, Optional
 # Try to import PyYAML, but gracefully degrade if not available
 try:
     import yaml
+
     HAS_YAML = True
 except ImportError:
     yaml = None  # type: ignore
@@ -70,10 +71,7 @@ def load_yaml_config(config_path: Optional[Path] = None) -> Dict[str, Any]:
         Configuration dictionary
     """
     if not HAS_YAML:
-        logger.warning(
-            "PyYAML not installed. Cannot load YAML config files. "
-            "Install with: pip install PyYAML"
-        )
+        logger.warning("PyYAML not installed. Cannot load YAML config files. " "Install with: pip install PyYAML")
         return {}
 
     if config_path is None:
@@ -272,8 +270,8 @@ def export_effective_config(config_file: Optional[str] = None) -> Dict[str, Any]
                 "1. Environment variables (RAG_* prefix)",
                 "2. Config file (if specified)",
                 "3. Default config (config/default.yaml)",
-                "4. Hardcoded defaults in config.py"
-            ]
+                "4. Hardcoded defaults in config.py",
+            ],
         }
     }
 
@@ -281,6 +279,7 @@ def export_effective_config(config_file: Optional[str] = None) -> Dict[str, Any]
 
 
 # Convenience functions for accessing common config values
+
 
 def get_llm_endpoint() -> str:
     """Get LLM endpoint URL."""
@@ -315,11 +314,15 @@ def is_fallback_enabled() -> bool:
 def get_retrieval_params() -> Dict[str, Any]:
     """Get retrieval parameters."""
     config = get_config()
-    return get_nested(config, "retrieval", default={
-        "top_k": 15,
-        "pack_top": 8,
-        "threshold": 0.25,
-        "alpha": 0.5,
-        "mmr_lambda": 0.75,
-        "faiss_multiplier": 3
-    })
+    return get_nested(
+        config,
+        "retrieval",
+        default={
+            "top_k": 15,
+            "pack_top": 8,
+            "threshold": 0.25,
+            "alpha": 0.5,
+            "mmr_lambda": 0.75,
+            "faiss_multiplier": 3,
+        },
+    )

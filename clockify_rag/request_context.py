@@ -23,9 +23,7 @@ import uuid
 from typing import Optional
 
 # Context variable for request ID (thread-safe)
-_request_id_var: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
-    "request_id", default=None
-)
+_request_id_var: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("request_id", default=None)
 
 
 def generate_request_id() -> str:

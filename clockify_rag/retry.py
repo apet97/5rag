@@ -58,7 +58,7 @@ def exponential_backoff(
         ~4.0 seconds (with jitter: 2.0-6.0s)
     """
     # Calculate exponential delay: base_delay * (exponential_base ^ attempt)
-    delay = min(base_delay * (exponential_base ** attempt), max_delay)
+    delay = min(base_delay * (exponential_base**attempt), max_delay)
 
     # Add jitter to prevent thundering herd problem
     # Jitter range: [delay * 0.5, delay * 1.5]
@@ -161,8 +161,7 @@ def retry_with_backoff(
                             on_retry(exc, attempt + 1, delay)
                         except Exception as callback_exc:
                             logger.warning(
-                                f"Retry callback failed | request_id={request_id} | "
-                                f"error={callback_exc}"
+                                f"Retry callback failed | request_id={request_id} | " f"error={callback_exc}"
                             )
 
                     # Wait before retrying
@@ -229,10 +228,7 @@ def retry_with_fallback(
 
         try:
             result = fallback_func()
-            logger.info(
-                f"Fallback succeeded | request_id={request_id} | "
-                f"fallback={fallback_func.__name__}"
-            )
+            logger.info(f"Fallback succeeded | request_id={request_id} | " f"fallback={fallback_func.__name__}")
             return result
         except Exception as fallback_exc:
             logger.error(
@@ -300,22 +296,12 @@ class RetryConfig:
                 logger.warning(f"Invalid {key} value, using default: {default}")
                 return default
 
-        cls.EMBEDDING_MAX_ATTEMPTS = _get_int_env(
-            "RAG_RETRY_EMBEDDING_MAX_ATTEMPTS", cls.EMBEDDING_MAX_ATTEMPTS
-        )
-        cls.LLM_MAX_ATTEMPTS = _get_int_env(
-            "RAG_RETRY_LLM_MAX_ATTEMPTS", cls.LLM_MAX_ATTEMPTS
-        )
-        cls.NETWORK_MAX_ATTEMPTS = _get_int_env(
-            "RAG_RETRY_NETWORK_MAX_ATTEMPTS", cls.NETWORK_MAX_ATTEMPTS
-        )
+        cls.EMBEDDING_MAX_ATTEMPTS = _get_int_env("RAG_RETRY_EMBEDDING_MAX_ATTEMPTS", cls.EMBEDDING_MAX_ATTEMPTS)
+        cls.LLM_MAX_ATTEMPTS = _get_int_env("RAG_RETRY_LLM_MAX_ATTEMPTS", cls.LLM_MAX_ATTEMPTS)
+        cls.NETWORK_MAX_ATTEMPTS = _get_int_env("RAG_RETRY_NETWORK_MAX_ATTEMPTS", cls.NETWORK_MAX_ATTEMPTS)
 
-        cls.EMBEDDING_BASE_DELAY = _get_float_env(
-            "RAG_RETRY_EMBEDDING_BASE_DELAY", cls.EMBEDDING_BASE_DELAY
-        )
-        cls.LLM_BASE_DELAY = _get_float_env(
-            "RAG_RETRY_LLM_BASE_DELAY", cls.LLM_BASE_DELAY
-        )
+        cls.EMBEDDING_BASE_DELAY = _get_float_env("RAG_RETRY_EMBEDDING_BASE_DELAY", cls.EMBEDDING_BASE_DELAY)
+        cls.LLM_BASE_DELAY = _get_float_env("RAG_RETRY_LLM_BASE_DELAY", cls.LLM_BASE_DELAY)
 
 
 # Initialize from environment on module import

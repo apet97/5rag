@@ -37,17 +37,17 @@ def extract_citations_regex(answer: str) -> List[str]:
         ['id_123', 'id_456']
     """
     # Pattern 1: Standard bracket format [id1, id2, ...]
-    bracket_pattern = r'\[([^\]]+)\]'
+    bracket_pattern = r"\[([^\]]+)\]"
     matches = re.findall(bracket_pattern, answer)
 
     citations = []
     for match in matches:
         # Split by comma and clean
-        parts = match.split(',')
+        parts = match.split(",")
         for part in parts:
             cleaned = part.strip()
             # Check if it looks like an ID (alphanumeric with underscores/hyphens)
-            if re.match(r'^[a-zA-Z0-9_-]+$', cleaned):
+            if re.match(r"^[a-zA-Z0-9_-]+$", cleaned):
                 citations.append(cleaned)
 
     return citations
@@ -66,15 +66,15 @@ def extract_citations_parentheses(answer: str) -> List[str]:
     Returns:
         List of extracted citation IDs
     """
-    pattern = r'\(([^\)]+)\)'
+    pattern = r"\(([^\)]+)\)"
     matches = re.findall(pattern, answer)
 
     citations = []
     for match in matches:
-        parts = match.split(',')
+        parts = match.split(",")
         for part in parts:
             cleaned = part.strip()
-            if re.match(r'^[a-zA-Z0-9_-]+$', cleaned) and ('id' in cleaned.lower() or '_' in cleaned):
+            if re.match(r"^[a-zA-Z0-9_-]+$", cleaned) and ("id" in cleaned.lower() or "_" in cleaned):
                 citations.append(cleaned)
 
     return citations
@@ -93,15 +93,15 @@ def extract_citations_curly_braces(answer: str) -> List[str]:
     Returns:
         List of extracted citation IDs
     """
-    pattern = r'\{([^\}]+)\}'
+    pattern = r"\{([^\}]+)\}"
     matches = re.findall(pattern, answer)
 
     citations = []
     for match in matches:
-        parts = match.split(',')
+        parts = match.split(",")
         for part in parts:
             cleaned = part.strip()
-            if re.match(r'^[a-zA-Z0-9_-]+$', cleaned) and ('id' in cleaned.lower() or '_' in cleaned):
+            if re.match(r"^[a-zA-Z0-9_-]+$", cleaned) and ("id" in cleaned.lower() or "_" in cleaned):
                 citations.append(cleaned)
 
     return citations
@@ -119,7 +119,7 @@ def extract_citations_inline(answer: str) -> List[str]:
         List of extracted citation IDs
     """
     # Pattern: word boundary, id pattern, word boundary
-    pattern = r'\b((?:id_|chunk_|doc_)[a-zA-Z0-9_-]+)\b'
+    pattern = r"\b((?:id_|chunk_|doc_)[a-zA-Z0-9_-]+)\b"
     matches = re.findall(pattern, answer, re.IGNORECASE)
 
     return list(set(matches))  # Remove duplicates
@@ -369,18 +369,13 @@ def validate_citations_comprehensive(
     citations = extract_citations_multi_strategy(answer)
 
     # Validate citation IDs
-    is_valid, valid_citations, invalid_citations = validate_citation_ids(
-        citations, context_chunk_ids
-    )
+    is_valid, valid_citations, invalid_citations = validate_citation_ids(citations, context_chunk_ids)
 
     # Compute semantic relevance (if embeddings provided)
     semantic_relevance = None
     if context_chunk_texts and answer_embedding is not None and chunk_embeddings:
         # Filter to only cited chunks
-        cited_indices = [
-            i for i, cid in enumerate(context_chunk_ids)
-            if str(cid) in valid_citations
-        ]
+        cited_indices = [i for i, cid in enumerate(context_chunk_ids) if str(cid) in valid_citations]
         cited_chunk_texts = [context_chunk_texts[i] for i in cited_indices]
         cited_embeddings = [chunk_embeddings[i] for i in cited_indices]
 
@@ -390,9 +385,7 @@ def validate_citations_comprehensive(
             )
 
     # Compute citation confidence
-    confidence = compute_citation_confidence(
-        len(citations), len(valid_citations), semantic_relevance
-    )
+    confidence = compute_citation_confidence(len(citations), len(valid_citations), semantic_relevance)
 
     return {
         "citations": citations,

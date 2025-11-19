@@ -177,8 +177,7 @@ def embed_texts(texts: list, retries=0) -> np.ndarray:
         with ThreadPoolExecutor(max_workers=config.EMB_MAX_WORKERS) as executor:
             # Submit all tasks - executor will manage the queue automatically
             future_to_index = {
-                executor.submit(_embed_single_text, i, text, retries, total): i
-                for i, text in enumerate(texts)
+                executor.submit(_embed_single_text, i, text, retries, total): i for i, text in enumerate(texts)
             }
 
             # Process results as they complete

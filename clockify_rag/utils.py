@@ -384,12 +384,7 @@ def check_rosetta():
     try:
         # Check sysctl.proc_translated
         # 0 = native ARM, 1 = Rosetta translation
-        result = subprocess.run(
-            ["sysctl", "-n", "sysctl.proc_translated"],
-            capture_output=True,
-            text=True,
-            timeout=2
-        )
+        result = subprocess.run(["sysctl", "-n", "sysctl.proc_translated"], capture_output=True, text=True, timeout=2)
 
         if result.returncode == 0 and result.stdout.strip() == "1":
             logger.warning(

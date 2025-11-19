@@ -473,6 +473,7 @@ def answer_once(
                 normalized.append(item)
         return normalized
 
+
 def prepare_context_pipeline(
     question: str,
     chunks: List[Dict],
@@ -509,7 +510,7 @@ def prepare_context_pipeline(
     """
     t_start = time.time()
     question_hash = hashlib.sha256(question.encode("utf-8")).hexdigest()[:12]
-    
+
     # Retrieve
     t0 = time.time()
     selected, scores = retrieve(
@@ -601,17 +602,29 @@ def answer_once(
     """
     metrics = metrics_module.get_metrics()
     metrics.increment_counter(MetricNames.QUERIES_TOTAL)
-    
+
     question_preview = sanitize_for_log(question, max_length=200)
     # Note: question_hash is re-calculated in pipeline, but we log start here.
     # Ideally we'd move logging into pipeline or after, but start log is useful.
     # We'll let pipeline calc hash again or just calc it here too if needed.
     # For consistency, let's just log here.
-    
+
     # Prepare context (Retrieve -> MMR -> Rerank -> Pack)
     ctx = prepare_context_pipeline(
-        question, chunks, vecs_n, bm, hnsw, top_k, pack_top, threshold,
-        use_rerank, seed, num_ctx, num_predict, retries, faiss_index_path
+        question,
+        chunks,
+        vecs_n,
+        bm,
+        hnsw,
+        top_k,
+        pack_top,
+        threshold,
+        use_rerank,
+        seed,
+        num_ctx,
+        num_predict,
+        retries,
+        faiss_index_path,
     )
 
     if not ctx["success"]:
@@ -667,18 +680,40 @@ def answer_once(
     except LLMUnavailableError as exc:
         logger.error(f"LLM unavailable during answer generation | request_id={get_request_id()} | error={exc}")
         return _handle_llm_failure(
-            "llm_unavailable", exc, question_hash, selected, mmr_selected, context_block,
-            packed_ids, used_tokens, rerank_applied, rerank_reason, t_start,
-            timing["retrieve_ms"] / 1000, timing["mmr_ms"] / 1000, timing["rerank_ms"] / 1000,
-            _normalize_chunk_ids
+            "llm_unavailable",
+            exc,
+            question_hash,
+            selected,
+            mmr_selected,
+            context_block,
+            packed_ids,
+            used_tokens,
+            rerank_applied,
+            rerank_reason,
+            t_start,
+            timing["retrieve_ms"] / 1000,
+            timing["mmr_ms"] / 1000,
+            timing["rerank_ms"] / 1000,
+            _normalize_chunk_ids,
         )
     except LLMError as exc:
         logger.error(f"LLM error during answer generation | request_id={get_request_id()} | error={exc}")
         return _handle_llm_failure(
-            "llm_error", exc, question_hash, selected, mmr_selected, context_block,
-            packed_ids, used_tokens, rerank_applied, rerank_reason, t_start, 
-            timing["retrieve_ms"] / 1000, timing["mmr_ms"] / 1000, timing["rerank_ms"] / 1000, 
-            _normalize_chunk_ids
+            "llm_error",
+            exc,
+            question_hash,
+            selected,
+            mmr_selected,
+            context_block,
+            packed_ids,
+            used_tokens,
+            rerank_applied,
+            rerank_reason,
+            t_start,
+            timing["retrieve_ms"] / 1000,
+            timing["mmr_ms"] / 1000,
+            timing["rerank_ms"] / 1000,
+            _normalize_chunk_ids,
         )
 
     total_time = time.time() - t_start

@@ -48,6 +48,7 @@ def _check_nli_availability() -> bool:
 
     try:
         from sentence_transformers import CrossEncoder
+
         _NLI_AVAILABLE = True
         return True
     except ImportError:
@@ -95,7 +96,7 @@ def _load_nli_model():
 def compute_entailment_score(
     answer: str,
     source_texts: List[str],
-    model = None,
+    model=None,
 ) -> Optional[float]:
     """Compute entailment score between answer and source texts.
 
@@ -145,6 +146,7 @@ def compute_entailment_score(
         # scores is array of shape (num_pairs, 3) with logits
         # We want the maximum entailment score across all sources
         import numpy as np
+
         scores_array = np.array(scores)
 
         # Apply softmax to convert logits to probabilities

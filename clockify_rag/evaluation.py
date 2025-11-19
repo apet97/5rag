@@ -55,10 +55,7 @@ def compute_precision_at_k(retrieved_ids: List[int], relevant_ids: Set[int], k: 
 
 def compute_ndcg_at_k(retrieved_ids: List[int], relevant_ids: Set[int], k: int = 10) -> float:
     """Normalized Discounted Cumulative Gain@K - position-aware metric."""
-    dcg = sum(
-        1.0 / np.log2(i + 2) if doc_id in relevant_ids else 0.0
-        for i, doc_id in enumerate(retrieved_ids[:k])
-    )
+    dcg = sum(1.0 / np.log2(i + 2) if doc_id in relevant_ids else 0.0 for i, doc_id in enumerate(retrieved_ids[:k]))
     idcg = sum(1.0 / np.log2(i + 2) for i in range(min(len(relevant_ids), k)))
     return dcg / idcg if idcg > 0 else 0.0
 
@@ -188,9 +185,9 @@ def evaluate_dataset(
 
     # Check for hybrid artifacts
     hybrid_artifacts_exist = (
-        os.path.exists(config.FILES["emb"]) and
-        os.path.exists(config.FILES["bm25"]) and
-        os.path.exists(config.FILES["chunks"])
+        os.path.exists(config.FILES["emb"])
+        and os.path.exists(config.FILES["bm25"])
+        and os.path.exists(config.FILES["chunks"])
     )
     faiss_available = os.path.exists(config.FILES["faiss_index"])
     faiss_index_path = config.FILES["faiss_index"] if faiss_available else None
@@ -250,7 +247,7 @@ def evaluate_dataset(
                 dataset.append(json.loads(line))
 
     id_map, title_section_map, title_map = _build_chunk_lookup(retrieval_chunks)
-    
+
     mrr_scores = []
     precision_at_5_scores = []
     ndcg_at_10_scores = []
@@ -260,7 +257,7 @@ def evaluate_dataset(
     for i, example in enumerate(dataset):
         query = example["query"]
         relevant_ids = _resolve_relevant_indices(example, id_map, title_section_map, title_map)
-        
+
         if not relevant_ids:
             if verbose:
                 logger.warning(f"Skipping query {i+1} ('{query}') - no matching relevant chunks found.")
@@ -290,13 +287,15 @@ def evaluate_dataset(
                     hnsw=hnsw,
                     faiss_index_path=faiss_index_path,
                 )
-                llm_outputs.append({
-                    "query": query,
-                    "answer": answer_payload["answer"],
-                    "confidence": answer_payload.get("confidence"),
-                    "refused": answer_payload.get("refused"),
-                    "metadata": answer_payload.get("metadata", {}),
-                })
+                llm_outputs.append(
+                    {
+                        "query": query,
+                        "answer": answer_payload["answer"],
+                        "confidence": answer_payload.get("confidence"),
+                        "refused": answer_payload.get("refused"),
+                        "metadata": answer_payload.get("metadata", {}),
+                    }
+                )
 
         except Exception as e:
             logger.error(f"Error evaluating query '{query}': {e}")

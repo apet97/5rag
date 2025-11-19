@@ -39,9 +39,7 @@ class RateLimiter:
         if self.enabled:
             self.requests = deque()  # (timestamp,) tuples
             self._lock = threading.Lock()
-            logger.info(
-                f"RateLimiter enabled: {max_requests} requests per {window_seconds}s window"
-            )
+            logger.info(f"RateLimiter enabled: {max_requests} requests per {window_seconds}s window")
         else:
             logger.info("RateLimiter disabled (no-op for internal deployment)")
 
@@ -163,9 +161,7 @@ class QueryCache:
         # Start auto-save thread if enabled
         if self.auto_save_enabled:
             self._start_auto_save_thread()
-            logger.info(
-                f"Cache auto-save enabled: interval={auto_save_interval}s, path={save_path}"
-            )
+            logger.info(f"Cache auto-save enabled: interval={auto_save_interval}s, path={save_path}")
 
     def _start_auto_save_thread(self):
         """Start background thread for automatic cache persistence."""
@@ -174,9 +170,7 @@ class QueryCache:
             return
 
         self._stop_save_thread.clear()
-        self._save_thread = threading.Thread(
-            target=self._auto_save_loop, daemon=True, name="QueryCache-AutoSave"
-        )
+        self._save_thread = threading.Thread(target=self._auto_save_loop, daemon=True, name="QueryCache-AutoSave")
         self._save_thread.start()
         logger.debug("Auto-save thread started")
 

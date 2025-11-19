@@ -237,28 +237,30 @@ def doctor(
     # Ollama Connectivity & Model Validation
     try:
         model_result = validate_models(log_warnings=False)
-        
+
         if model_result["server_reachable"]:
             console.print(f"✅ Ollama: Connected to {config.RAG_OLLAMA_URL}")
-            
+
             # Check required models
             chat_available = model_result["chat_model"]["available"]
             embed_available = model_result["embed_model"]["available"]
             fallback_available = model_result["fallback_model"]["available"]
-            
+
             console.print(f"  📦 Available models: {len(model_result['models_available'])}")
             console.print(f"     • Chat model ({config.RAG_CHAT_MODEL}): {'✅' if chat_available else '❌ MISSING'}")
             console.print(f"     • Embed model ({config.RAG_EMBED_MODEL}): {'✅' if embed_available else '❌ MISSING'}")
-            
+
             if config.RAG_FALLBACK_ENABLED:
-                console.print(f"     • Fallback model ({config.RAG_FALLBACK_MODEL}): {'✅' if fallback_available else '⚠️  MISSING'}")
-            
+                console.print(
+                    f"     • Fallback model ({config.RAG_FALLBACK_MODEL}): {'✅' if fallback_available else '⚠️  MISSING'}"
+                )
+
             if not model_result["all_required_available"]:
                 console.print("\n  ⚠️  Some required models are missing! Run 'ollama pull <model>' to fix.")
         else:
             console.print(f"❌ Ollama: Connection failed to {config.RAG_OLLAMA_URL}")
             console.print("  💡 Check if Ollama is running and accessible.")
-            
+
     except Exception as e:
         console.print(f"❌ Ollama: Validation error - {e}")
     console.print()
@@ -336,6 +338,7 @@ def config_show(
             # YAML output
             try:
                 import yaml
+
                 console.print(yaml.dump(effective_config, default_flow_style=False, sort_keys=False))
             except ImportError:
                 console.print("⚠️  PyYAML not installed. Showing JSON format instead:")
@@ -576,6 +579,7 @@ def eval(
 
     try:
         import ragas
+
         console.print(f"✅ RAGAS {ragas.__version__} loaded")
     except ImportError:
         # RAGAS is optional for internal metrics (MRR/NDCG) but required for LLM-based metrics
@@ -588,25 +592,21 @@ def eval(
         results = evaluate_dataset(
             dataset_path=questions_file,
             verbose=True,  # Always verbose for CLI to show progress
-            llm_report=False, # TODO: Add flag for this
-            llm_output=os.path.join(output_dir, "llm_answers.jsonl")
+            llm_report=False,  # TODO: Add flag for this
+            llm_output=os.path.join(output_dir, "llm_answers.jsonl"),
         )
 
         # Display Results
         console.print()
         console.print(Panel("📈 Evaluation Results", style="bold green"))
-        
+
         table = Table(show_header=True, header_style="bold magenta")
         table.add_column("Metric", style="cyan")
         table.add_column("Score", justify="right")
         table.add_column("Threshold", justify="right")
         table.add_column("Status", justify="center")
 
-        metrics_map = {
-            "mrr_at_10": "MRR@10",
-            "precision_at_5": "Precision@5",
-            "ndcg_at_10": "NDCG@10"
-        }
+        metrics_map = {"mrr_at_10": "MRR@10", "precision_at_5": "Precision@5", "ndcg_at_10": "NDCG@10"}
 
         success = True
         for key, label in metrics_map.items():
@@ -667,12 +667,13 @@ def benchmark(
     # Load index
     with console.status("[bold green]Loading index..."):
         chunks, vecs_n, bm, hnsw = ensure_index_ready(retries=2)
-        # We need faiss_index_path if hnsw is None but file exists, 
+        # We need faiss_index_path if hnsw is None but file exists,
         # but ensure_index_ready returns loaded objects.
         # For benchmarking, we might want to pass the path if we want to test loading?
         # But the benchmark functions take loaded objects mostly.
         # Let's check if we can get the path.
         from .config import FILES
+
         faiss_index_path = FILES["faiss_index"] if os.path.exists(FILES["faiss_index"]) else None
 
     console.print(f"✅ Loaded {len(chunks)} chunks")
@@ -705,12 +706,16 @@ def benchmark(
     if not embedding and not e2e:
         console.print("[bold cyan]--- Retrieval Benchmarks ---[/bold cyan]")
         with console.status("Benchmarking hybrid retrieval..."):
-            res = benchmark_retrieval_hybrid(chunks, vecs_n, bm, hnsw=hnsw, faiss_index_path=faiss_index_path, iterations=int(20 * iter_multiplier))
+            res = benchmark_retrieval_hybrid(
+                chunks, vecs_n, bm, hnsw=hnsw, faiss_index_path=faiss_index_path, iterations=int(20 * iter_multiplier)
+            )
             results.append(res)
             console.print(f"✅ {res.name}: {res.summary()['latency_ms']['mean']:.2f}ms")
 
         with console.status("Benchmarking retrieval + MMR..."):
-            res = benchmark_retrieval_with_mmr(chunks, vecs_n, bm, hnsw=hnsw, faiss_index_path=faiss_index_path, iterations=int(20 * iter_multiplier))
+            res = benchmark_retrieval_with_mmr(
+                chunks, vecs_n, bm, hnsw=hnsw, faiss_index_path=faiss_index_path, iterations=int(20 * iter_multiplier)
+            )
             results.append(res)
             console.print(f"✅ {res.name}: {res.summary()['latency_ms']['mean']:.2f}ms")
         console.print()
@@ -719,13 +724,22 @@ def benchmark(
     if not embedding and not retrieval:
         console.print("[bold cyan]--- End-to-End Benchmarks ---[/bold cyan]")
         with console.status("Benchmarking simple query..."):
-            res = benchmark_e2e_simple(chunks, vecs_n, bm, hnsw=hnsw, faiss_index_path=faiss_index_path, iterations=int(10 * iter_multiplier))
+            res = benchmark_e2e_simple(
+                chunks, vecs_n, bm, hnsw=hnsw, faiss_index_path=faiss_index_path, iterations=int(10 * iter_multiplier)
+            )
             results.append(res)
             console.print(f"✅ {res.name}: {res.summary()['latency_ms']['mean']:.2f}ms")
 
         if not quick:
             with console.status("Benchmarking complex query..."):
-                res = benchmark_e2e_complex(chunks, vecs_n, bm, hnsw=hnsw, faiss_index_path=faiss_index_path, iterations=int(5 * iter_multiplier))
+                res = benchmark_e2e_complex(
+                    chunks,
+                    vecs_n,
+                    bm,
+                    hnsw=hnsw,
+                    faiss_index_path=faiss_index_path,
+                    iterations=int(5 * iter_multiplier),
+                )
                 results.append(res)
                 console.print(f"✅ {res.name}: {res.summary()['latency_ms']['mean']:.2f}ms")
         console.print()
@@ -743,9 +757,9 @@ def benchmark(
     # Summary
     console.print()
     console.print(Panel("📊 Benchmark Results", style="bold green"))
-    
+
     summaries = [r.summary() for r in results]
-    
+
     table = Table(show_header=True, header_style="bold magenta")
     table.add_column("Name", style="cyan")
     table.add_column("Latency (ms)", justify="right")
@@ -756,7 +770,7 @@ def benchmark(
         latency = f"{s['latency_ms']['mean']:.2f} ± {s['latency_ms']['stdev']:.2f}"
         throughput = f"{s['throughput']['ops_per_sec']:.2f}"
         memory = f"{s['memory_mb']['peak']:.2f}"
-        table.add_row(s['name'], latency, throughput, memory)
+        table.add_row(s["name"], latency, throughput, memory)
 
     console.print(table)
 

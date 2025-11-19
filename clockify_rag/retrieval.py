@@ -489,7 +489,7 @@ def _retrieve_candidates(
 
     if not candidate_idx:
         if dense_scores_full is None:
-             dense_scores_full = vecs_n.dot(qv_n)
+            dense_scores_full = vecs_n.dot(qv_n)
         max_candidates = max(config.ANN_CANDIDATE_MIN, top_k * config.FAISS_CANDIDATE_MULTIPLIER)
         if len(chunks) > max_candidates:
             top_indices = np.argsort(dense_scores_full)[::-1][:max_candidates]
@@ -513,7 +513,7 @@ def _compute_normalized_scores(
     # Normalize once, then slice for candidates
     zs_bm_full = normalize_scores_zscore(bm_scores_full)
     zs_dense_full = None
-    
+
     if dense_scores_full is not None:
         dense_scores_full = np.asarray(dense_scores_full, dtype="float32")
         zs_dense_full = normalize_scores_zscore(dense_scores_full)
@@ -521,9 +521,9 @@ def _compute_normalized_scores(
     else:
         dense_scores = np.asarray(dense_scores, dtype="float32")
         zs_dense = normalize_scores_zscore(dense_scores)
-        
+
     zs_bm = zs_bm_full[candidate_idx_array] if candidate_idx_array.size else np.array([], dtype="float32")
-    
+
     return zs_dense, zs_bm, zs_dense_full, zs_bm_full
 
 
@@ -634,23 +634,23 @@ def retrieve(
     zs_dense, zs_bm, zs_dense_full, zs_bm_full = _compute_normalized_scores(
         candidate_idx, dense_scores, dense_scores_full, bm_scores_full
     )
-    
+
     # 4. Apply Intent Boosting
     if config.USE_INTENT_CLASSIFICATION and intent_config:
-         # Re-slice dense scores if not fully materialized but needed for boosting
-         # Note: If dense_scores_full is None (FAISS), we can't boost dense scores easily without full compute
-         # So we only boost what we have or what is cheap.
-         # The helper handles the logic.
-         zs_dense, zs_bm, zs_bm_full, zs_dense_full = _apply_intent_boosting(
+        # Re-slice dense scores if not fully materialized but needed for boosting
+        # Note: If dense_scores_full is None (FAISS), we can't boost dense scores easily without full compute
+        # So we only boost what we have or what is cheap.
+        # The helper handles the logic.
+        zs_dense, zs_bm, zs_bm_full, zs_dense_full = _apply_intent_boosting(
             chunks, candidate_idx_array, zs_bm_full, zs_dense_full, intent_config
         )
-         # If dense_scores_full was None, zs_dense_full remains None, and zs_dense is unchanged unless we had it.
-         if zs_dense_full is None and dense_scores is not None:
-             # We have candidate dense scores but not full. Boosting logic above only updates full.
-             # We need to boost candidate dense scores manually if full is missing.
-             # But `adjust_scores_by_intent` works on full arrays usually.
-             # Let's stick to the original logic which only boosted if available.
-             pass
+        # If dense_scores_full was None, zs_dense_full remains None, and zs_dense is unchanged unless we had it.
+        if zs_dense_full is None and dense_scores is not None:
+            # We have candidate dense scores but not full. Boosting logic above only updates full.
+            # We need to boost candidate dense scores manually if full is missing.
+            # But `adjust_scores_by_intent` works on full arrays usually.
+            # Let's stick to the original logic which only boosted if available.
+            pass
 
     # 5. Hybrid Scoring
     # 5. Hybrid Scoring
@@ -661,7 +661,7 @@ def retrieve(
             zs_bm = np.zeros_like(zs_dense)
         elif zs_dense.size == 0:
             zs_dense = np.zeros_like(zs_bm)
-        
+
         # If still mismatched (e.g. different non-zero lengths), truncate to minimum
         if zs_bm.shape != zs_dense.shape:
             min_len = min(len(zs_bm), len(zs_dense))

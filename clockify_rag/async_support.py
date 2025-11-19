@@ -271,8 +271,20 @@ async def async_answer_once(
     # Prepare context (Retrieve -> MMR -> Rerank -> Pack)
     # Note: Reranking is currently synchronous inside prepare_context_pipeline
     ctx = prepare_context_pipeline(
-        question, chunks, vecs_n, bm, hnsw, top_k, pack_top, threshold,
-        use_rerank, seed, num_ctx, num_predict, retries, faiss_index_path
+        question,
+        chunks,
+        vecs_n,
+        bm,
+        hnsw,
+        top_k,
+        pack_top,
+        threshold,
+        use_rerank,
+        seed,
+        num_ctx,
+        num_predict,
+        retries,
+        faiss_index_path,
     )
 
     if not ctx["success"]:
@@ -315,18 +327,40 @@ async def async_answer_once(
     except LLMUnavailableError as exc:
         logger.error(f"LLM unavailable during async answer generation: {exc}")
         return _handle_llm_failure(
-            "llm_unavailable", exc, question_hash, selected, mmr_selected, context_block,
-            packed_ids, used_tokens, rerank_applied, rerank_reason, t_start, 
-            timing["retrieve_ms"] / 1000, timing["mmr_ms"] / 1000, timing["rerank_ms"] / 1000, 
-            _normalize_chunk_ids
+            "llm_unavailable",
+            exc,
+            question_hash,
+            selected,
+            mmr_selected,
+            context_block,
+            packed_ids,
+            used_tokens,
+            rerank_applied,
+            rerank_reason,
+            t_start,
+            timing["retrieve_ms"] / 1000,
+            timing["mmr_ms"] / 1000,
+            timing["rerank_ms"] / 1000,
+            _normalize_chunk_ids,
         )
     except LLMError as exc:
         logger.error(f"LLM error during async answer generation: {exc}")
         return _handle_llm_failure(
-            "llm_error", exc, question_hash, selected, mmr_selected, context_block,
-            packed_ids, used_tokens, rerank_applied, rerank_reason, t_start, 
-            timing["retrieve_ms"] / 1000, timing["mmr_ms"] / 1000, timing["rerank_ms"] / 1000, 
-            _normalize_chunk_ids
+            "llm_error",
+            exc,
+            question_hash,
+            selected,
+            mmr_selected,
+            context_block,
+            packed_ids,
+            used_tokens,
+            rerank_applied,
+            rerank_reason,
+            t_start,
+            timing["retrieve_ms"] / 1000,
+            timing["mmr_ms"] / 1000,
+            timing["rerank_ms"] / 1000,
+            _normalize_chunk_ids,
         )
 
     total_time = time.time() - t_start

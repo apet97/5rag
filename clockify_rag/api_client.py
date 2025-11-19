@@ -1010,7 +1010,7 @@ def chat_completion(
             str(e)[:100],  # Truncate long error messages
             RAG_FALLBACK_PROVIDER,
             RAG_FALLBACK_MODEL,
-            model or "default"
+            model or "default",
         )
 
         # Use fallback model if no specific model was requested
@@ -1027,25 +1027,18 @@ def chat_completion(
             )
             fallback_duration = time.time() - fallback_start
             logger.info(
-                "✅ LLM FALLBACK SUCCEEDED | "
-                "provider=%s | "
-                "model=%s | "
-                "latency_ms=%.0f",
+                "✅ LLM FALLBACK SUCCEEDED | " "provider=%s | " "model=%s | " "latency_ms=%.0f",
                 RAG_FALLBACK_PROVIDER,
                 fallback_model,
-                fallback_duration * 1000
+                fallback_duration * 1000,
             )
             return response
         except Exception as fallback_error:
             logger.error(
-                "❌ LLM FALLBACK FAILED | "
-                "provider=%s | "
-                "model=%s | "
-                "error=%s | "
-                "both_llms_unavailable=true",
+                "❌ LLM FALLBACK FAILED | " "provider=%s | " "model=%s | " "error=%s | " "both_llms_unavailable=true",
                 RAG_FALLBACK_PROVIDER,
                 fallback_model,
-                str(fallback_error)[:100]
+                str(fallback_error)[:100],
             )
             # Re-raise the original error with context about fallback failure
             raise LLMUnavailableError(
