@@ -213,6 +213,37 @@ RAG_GPT_OSS_CTX_BUDGET = _parse_env_int(
 # Chat timeout increased to 180s (vs 120s for qwen) to allow for reasoning traces
 RAG_GPT_OSS_CHAT_TIMEOUT = _parse_env_float("RAG_GPT_OSS_CHAT_TIMEOUT", 180.0, min_val=10.0, max_val=600.0)
 
+# Additional sampling parameters for GPT-OSS
+# These were previously hardcoded but are now configurable
+RAG_GPT_OSS_TOP_K = _parse_env_int("RAG_GPT_OSS_TOP_K", 40, min_val=1, max_val=100)
+RAG_GPT_OSS_REPEAT_PENALTY = _parse_env_float("RAG_GPT_OSS_REPEAT_PENALTY", 1.05, min_val=1.0, max_val=2.0)
+
+# ====== OLLAMA SAMPLING PARAMETERS ======
+# Sampling parameters for standard Ollama models (qwen2.5:32b, etc.)
+# These were previously hardcoded in api_client.py but are now configurable
+#
+# Temperature: Controls randomness in generation
+# - 0.0: Deterministic (same input → same output)
+# - 0.7-1.0: Balanced creativity and consistency
+# - 1.0+: More creative but less predictable
+RAG_OLLAMA_TEMPERATURE = _parse_env_float("RAG_OLLAMA_TEMPERATURE", 0.0, min_val=0.0, max_val=2.0)
+
+# Top P (nucleus sampling): Cumulative probability threshold
+# - Lower values (0.1-0.5): More focused, conservative outputs
+# - Higher values (0.9-1.0): More diverse outputs
+RAG_OLLAMA_TOP_P = _parse_env_float("RAG_OLLAMA_TOP_P", 0.9, min_val=0.0, max_val=1.0)
+
+# Top K: Limits token selection to top K most likely tokens
+# - Lower values (10-20): More focused
+# - Higher values (40-100): More diverse
+RAG_OLLAMA_TOP_K = _parse_env_int("RAG_OLLAMA_TOP_K", 40, min_val=1, max_val=200)
+
+# Repeat Penalty: Penalizes repeated tokens
+# - 1.0: No penalty
+# - 1.05-1.2: Moderate penalty (good for avoiding repetition)
+# - 1.5+: Strong penalty (may make text less natural)
+RAG_OLLAMA_REPEAT_PENALTY = _parse_env_float("RAG_OLLAMA_REPEAT_PENALTY", 1.05, min_val=1.0, max_val=2.0)
+
 # ====== AUTOMATIC MODEL FALLBACK ======
 # Enable automatic fallback to secondary model when primary model is unavailable
 # This prevents total service failure when the primary model (qwen2.5:32b) is down
@@ -440,6 +471,13 @@ STRICT_CITATIONS = _get_bool_env(
 CACHE_MAXSIZE = _parse_env_int("CACHE_MAXSIZE", 100, min_val=1, max_val=10000)
 # Cache TTL in seconds
 CACHE_TTL = _parse_env_int("CACHE_TTL", 3600, min_val=60, max_val=86400)
+# Cache auto-save: enable background persistence (disabled by default)
+CACHE_AUTO_SAVE_ENABLED = _get_bool_env("CACHE_AUTO_SAVE_ENABLED", "0")  # Disabled by default
+# Cache auto-save interval in seconds (only applies if enabled)
+CACHE_AUTO_SAVE_INTERVAL = _parse_env_int("CACHE_AUTO_SAVE_INTERVAL", 300, min_val=30, max_val=3600)
+# Rate limiting: enable/disable (disabled by default for internal deployment)
+# Set to true for external/public APIs to prevent abuse
+RATE_LIMIT_ENABLED = _get_bool_env("RATE_LIMIT_ENABLED", "0")  # Disabled by default
 # Rate limiting: max requests per window
 RATE_LIMIT_REQUESTS = _parse_env_int("RATE_LIMIT_REQUESTS", 10, min_val=1, max_val=1000)
 # Rate limiting window in seconds

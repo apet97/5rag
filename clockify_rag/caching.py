@@ -15,62 +15,132 @@ _QUERY_CACHE = None
 
 
 class RateLimiter:
-    """Rate limiter DISABLED for internal deployment (no-op for backward compatibility).
+    """Sliding window rate limiter with configurable enable/disable.
 
-    OPTIMIZATION: For internal use, rate limiting adds unnecessary overhead (~5-10ms per query).
-    This class is kept for API compatibility but all methods return permissive values.
+    Can be disabled for internal deployment (adds ~5-10ms overhead when enabled).
+    When disabled, all methods return permissive values (backward compatible).
+
+    Uses a sliding window algorithm to track requests per time window.
+    Thread-safe for concurrent API access.
     """
 
-    def __init__(self, max_requests=10, window_seconds=60):
-        """Initialize rate limiter (no-op for internal deployment).
+    def __init__(self, max_requests=10, window_seconds=60, enabled=True):
+        """Initialize rate limiter.
 
         Args:
-            max_requests: Ignored (kept for API compatibility)
-            window_seconds: Ignored (kept for API compatibility)
+            max_requests: Maximum requests allowed in window
+            window_seconds: Time window in seconds
+            enabled: Enable rate limiting (default: True, set False for internal deployment)
         """
-        # No-op initialization - no state tracking for internal deployment
-        pass
+        self.max_requests = max_requests
+        self.window_seconds = window_seconds
+        self.enabled = enabled
+
+        if self.enabled:
+            self.requests = deque()  # (timestamp,) tuples
+            self._lock = threading.Lock()
+            logger.info(
+                f"RateLimiter enabled: {max_requests} requests per {window_seconds}s window"
+            )
+        else:
+            logger.info("RateLimiter disabled (no-op for internal deployment)")
+
+    def _clean_old_requests(self, now: float):
+        """Remove requests older than window (internal helper, assumes lock held)."""
+        cutoff = now - self.window_seconds
+        while self.requests and self.requests[0] < cutoff:
+            self.requests.popleft()
 
     def allow_request(self) -> bool:
-        """Always allow requests for internal deployment.
+        """Check if request is allowed under rate limit.
 
         Returns:
-            Always True (no rate limiting for internal use)
+            True if request is allowed, False if rate limit exceeded
         """
-        return True  # Always allow for internal deployment
+        if not self.enabled:
+            return True  # Always allow when disabled
+
+        with self._lock:
+            now = time.time()
+            self._clean_old_requests(now)
+
+            # Check if within limit
+            if len(self.requests) < self.max_requests:
+                self.requests.append(now)
+                return True
+
+            return False
 
     def wait_time(self) -> float:
-        """Always return 0 for internal deployment.
+        """Calculate seconds to wait before next request is allowed.
 
         Returns:
-            Always 0.0 (no waiting required)
+            Seconds to wait (0.0 if request would be allowed now)
         """
-        return 0.0  # Never wait for internal deployment
+        if not self.enabled:
+            return 0.0  # Never wait when disabled
+
+        with self._lock:
+            now = time.time()
+            self._clean_old_requests(now)
+
+            # If under limit, no wait needed
+            if len(self.requests) < self.max_requests:
+                return 0.0
+
+            # Calculate when oldest request will expire
+            oldest = self.requests[0]
+            wait = (oldest + self.window_seconds) - now
+            return max(0.0, wait)
 
 
-# Global rate limiter (10 queries per minute by default)
+# Global rate limiter (10 queries per minute by default, disabled for internal use)
 def get_rate_limiter():
     """Get global rate limiter instance.
 
     FIX (Error #2): Use proper `is None` check instead of fragile globals() check.
+
+    Rate limiting is disabled by default for internal deployment.
+    Set RATE_LIMIT_ENABLED=true in environment to enable for public APIs.
     """
     from . import config  # Import here to avoid circular import
 
     global _RATE_LIMITER
     if _RATE_LIMITER is None:
-        _RATE_LIMITER = RateLimiter(max_requests=config.RATE_LIMIT_REQUESTS, window_seconds=config.RATE_LIMIT_WINDOW)
+        _RATE_LIMITER = RateLimiter(
+            max_requests=config.RATE_LIMIT_REQUESTS,
+            window_seconds=config.RATE_LIMIT_WINDOW,
+            enabled=config.RATE_LIMIT_ENABLED,
+        )
     return _RATE_LIMITER
 
 
 class QueryCache:
-    """TTL-based cache for repeated queries to eliminate redundant computation."""
+    """TTL-based cache for repeated queries to eliminate redundant computation.
 
-    def __init__(self, maxsize=100, ttl_seconds=3600):
+    Features:
+    - LRU eviction with configurable maxsize
+    - TTL-based expiration
+    - Thread-safe for concurrent access
+    - Optional automatic persistence with background thread
+    """
+
+    def __init__(
+        self,
+        maxsize=100,
+        ttl_seconds=3600,
+        auto_save_enabled=False,
+        auto_save_interval=300,
+        save_path="query_cache.json",
+    ):
         """Initialize query cache.
 
         Args:
             maxsize: Maximum number of cached queries (LRU eviction)
             ttl_seconds: Time-to-live for cache entries in seconds
+            auto_save_enabled: Enable automatic background persistence (default: False)
+            auto_save_interval: Auto-save interval in seconds (default: 300 = 5 minutes)
+            save_path: File path for cache persistence (default: query_cache.json)
         """
         self.maxsize = maxsize
         self.ttl_seconds = ttl_seconds
@@ -81,6 +151,76 @@ class QueryCache:
         self.hits = 0
         self.misses = 0
         self._lock = threading.RLock()  # Thread safety lock
+
+        # Auto-save configuration
+        self.auto_save_enabled = auto_save_enabled
+        self.auto_save_interval = auto_save_interval
+        self.save_path = save_path
+        self._save_thread = None
+        self._stop_save_thread = threading.Event()
+        self._dirty = False  # Track if cache has unsaved changes
+
+        # Start auto-save thread if enabled
+        if self.auto_save_enabled:
+            self._start_auto_save_thread()
+            logger.info(
+                f"Cache auto-save enabled: interval={auto_save_interval}s, path={save_path}"
+            )
+
+    def _start_auto_save_thread(self):
+        """Start background thread for automatic cache persistence."""
+        if self._save_thread is not None:
+            logger.warning("Auto-save thread already running")
+            return
+
+        self._stop_save_thread.clear()
+        self._save_thread = threading.Thread(
+            target=self._auto_save_loop, daemon=True, name="QueryCache-AutoSave"
+        )
+        self._save_thread.start()
+        logger.debug("Auto-save thread started")
+
+    def _auto_save_loop(self):
+        """Background thread loop for periodic cache saving."""
+        while not self._stop_save_thread.wait(timeout=self.auto_save_interval):
+            try:
+                # Only save if there are unsaved changes
+                with self._lock:
+                    if self._dirty and len(self.cache) > 0:
+                        logger.debug("Auto-save: saving cache (dirty flag set)")
+                        self.save(self.save_path)
+                        self._dirty = False
+                    else:
+                        logger.debug("Auto-save: skipping (no changes or empty cache)")
+            except Exception as e:
+                logger.warning(f"Auto-save failed: {e}")
+
+        # Final save on shutdown if dirty
+        try:
+            with self._lock:
+                if self._dirty and len(self.cache) > 0:
+                    logger.info("Auto-save: final save on shutdown")
+                    self.save(self.save_path)
+                    self._dirty = False
+        except Exception as e:
+            logger.warning(f"Auto-save final save failed: {e}")
+
+    def stop_auto_save(self):
+        """Stop the auto-save background thread gracefully."""
+        if self._save_thread is None:
+            return
+
+        logger.info("Stopping auto-save thread...")
+        self._stop_save_thread.set()
+
+        # Wait for thread to finish (with timeout)
+        self._save_thread.join(timeout=5.0)
+        if self._save_thread.is_alive():
+            logger.warning("Auto-save thread did not stop within timeout")
+        else:
+            logger.info("Auto-save thread stopped")
+
+        self._save_thread = None
 
     def _hash_question(self, question: str, params: dict = None) -> str:
         """Generate cache key from question and retrieval parameters.
@@ -168,6 +308,9 @@ class QueryCache:
                 self.access_order.remove(key)
             self.access_order.append(key)
 
+            # Mark cache as dirty for auto-save
+            self._dirty = True
+
             logger.debug(f"[cache] PUT question_hash={key[:8]}")
 
     def clear(self):
@@ -177,7 +320,15 @@ class QueryCache:
             self.access_order.clear()
             self.hits = 0
             self.misses = 0
+            self._dirty = False  # Nothing to save after clear
             logger.info("[cache] CLEAR")
+
+    def __del__(self):
+        """Destructor to ensure auto-save thread is stopped."""
+        try:
+            self.stop_auto_save()
+        except Exception:
+            pass  # Best-effort cleanup
 
     def stats(self) -> dict:
         """Get cache statistics.
@@ -295,12 +446,21 @@ def get_query_cache():
     """Get global query cache instance.
 
     FIX (Error #2): Use proper `is None` check instead of fragile globals() check.
+
+    Auto-save is disabled by default. Set CACHE_AUTO_SAVE_ENABLED=true to enable
+    automatic background persistence (prevents cache loss on crashes).
     """
     from . import config  # Import here to avoid circular import
 
     global _QUERY_CACHE
     if _QUERY_CACHE is None:
-        _QUERY_CACHE = QueryCache(maxsize=config.CACHE_MAXSIZE, ttl_seconds=config.CACHE_TTL)
+        _QUERY_CACHE = QueryCache(
+            maxsize=config.CACHE_MAXSIZE,
+            ttl_seconds=config.CACHE_TTL,
+            auto_save_enabled=config.CACHE_AUTO_SAVE_ENABLED,
+            auto_save_interval=config.CACHE_AUTO_SAVE_INTERVAL,
+            save_path=config.FILES.get("query_cache", "query_cache.json"),
+        )
     return _QUERY_CACHE
 
 

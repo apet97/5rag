@@ -23,8 +23,14 @@ from .config import (
     RAG_GPT_OSS_MODEL,
     RAG_GPT_OSS_TEMPERATURE,
     RAG_GPT_OSS_TOP_P,
+    RAG_GPT_OSS_TOP_K,
+    RAG_GPT_OSS_REPEAT_PENALTY,
     RAG_GPT_OSS_CTX_WINDOW,
     RAG_GPT_OSS_CHAT_TIMEOUT,
+    RAG_OLLAMA_TEMPERATURE,
+    RAG_OLLAMA_TOP_P,
+    RAG_OLLAMA_TOP_K,
+    RAG_OLLAMA_REPEAT_PENALTY,
     RAG_FALLBACK_ENABLED,
     RAG_FALLBACK_PROVIDER,
     RAG_FALLBACK_MODEL,
@@ -249,13 +255,13 @@ class OllamaAPIClient(BaseLLMClient):
         """
         model = model or self.gen_model
         options = options or {
-            "temperature": 0,
+            "temperature": RAG_OLLAMA_TEMPERATURE,
             "seed": DEFAULT_SEED,
             "num_ctx": DEFAULT_NUM_CTX,
             "num_predict": DEFAULT_NUM_PREDICT,
-            "top_p": 0.9,
-            "top_k": 40,
-            "repeat_penalty": 1.05,
+            "top_p": RAG_OLLAMA_TOP_P,
+            "top_k": RAG_OLLAMA_TOP_K,
+            "repeat_penalty": RAG_OLLAMA_REPEAT_PENALTY,
         }
 
         payload: ChatCompletionRequest = {"model": model, "messages": messages, "options": options, "stream": stream}
@@ -697,13 +703,13 @@ class GptOssAPIClient(OllamaAPIClient):
         # Use gpt-oss-specific defaults if options not provided
         if options is None:
             options = {
-                "temperature": RAG_GPT_OSS_TEMPERATURE,  # 1.0 (OpenAI's default)
-                "top_p": RAG_GPT_OSS_TOP_P,  # 1.0 (OpenAI's default)
+                "temperature": RAG_GPT_OSS_TEMPERATURE,  # Configurable (default: 1.0, OpenAI's default)
+                "top_p": RAG_GPT_OSS_TOP_P,  # Configurable (default: 1.0, OpenAI's default)
                 "seed": DEFAULT_SEED,  # 42 (deterministic)
-                "num_ctx": RAG_GPT_OSS_CTX_WINDOW,  # 128000 (128k context)
+                "num_ctx": RAG_GPT_OSS_CTX_WINDOW,  # Configurable (default: 128000, 128k context)
                 "num_predict": DEFAULT_NUM_PREDICT,  # 512 (same as qwen)
-                "top_k": 40,  # Standard default
-                "repeat_penalty": 1.05,  # Standard default
+                "top_k": RAG_GPT_OSS_TOP_K,  # Configurable (default: 40)
+                "repeat_penalty": RAG_GPT_OSS_REPEAT_PENALTY,  # Configurable (default: 1.05)
             }
 
         # Call parent implementation with gpt-oss-tuned options

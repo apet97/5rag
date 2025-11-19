@@ -3,7 +3,7 @@
 import json
 import logging
 import os
-from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
 
@@ -168,62 +168,29 @@ def embed_texts(texts: list, retries=0) -> np.ndarray:
 
     total = len(texts)
 
-    # OPTIMIZATION: Always use parallel batching for 3-5x speedup, even on small batches
-    # This eliminates the sequential fallback that added 10x overhead on query embeddings
-    # Previous behavior: sequential for < 32 texts or single-threaded
-    # New behavior: always parallel (even for 1 text, the overhead is negligible vs 3-5x speedup)
-
-    # Parallel batching mode (always enabled for internal deployment)
-    # Priority #7: Cap outstanding futures to prevent socket exhaustion
+    # OPTIMIZATION: Use parallel batching for 3-5x speedup
+    # ThreadPoolExecutor automatically manages worker pool and task queue
     logger.info(f"[Rank 10] Embedding {total} texts with {config.EMB_MAX_WORKERS} workers")
     results = [None] * total  # Pre-allocate to maintain order
-    completed = 0
-
-    # Priority #7: Limit outstanding futures to max_workers * config.EMB_BATCH_SIZE
-    # This prevents memory exhaustion and socket exhaustion on large corpora
-    max_outstanding = config.EMB_MAX_WORKERS * config.EMB_BATCH_SIZE
-    logger.debug(f"[Priority #7] Capping outstanding futures at {max_outstanding}")
 
     try:
         with ThreadPoolExecutor(max_workers=config.EMB_MAX_WORKERS) as executor:
-            # Priority #7: Use sliding window approach instead of submitting all at once
-            # Submit initial batch
-            pending_futures = {}
-            text_iter = enumerate(texts)
+            # Submit all tasks - executor will manage the queue automatically
+            future_to_index = {
+                executor.submit(_embed_single_text, i, text, retries, total): i
+                for i, text in enumerate(texts)
+            }
 
-            # Submit initial batch up to max_outstanding without dropping the item
-            while len(pending_futures) < max_outstanding:
-                try:
-                    i, text = next(text_iter)
-                except StopIteration:
-                    break
-                future = executor.submit(_embed_single_text, i, text, retries, total)
-                pending_futures[future] = i
+            # Process results as they complete
+            completed = 0
+            for future in as_completed(future_to_index):
+                idx_result, emb = future.result()  # Will raise if _embed_single_text raised
+                results[idx_result] = emb
+                completed += 1
 
-            # Process completions and submit new tasks as slots open
-            while pending_futures:
-                # Wait for at least one future to complete
-                done, _ = wait(pending_futures.keys(), return_when=FIRST_COMPLETED)
-
-                for future in done:
-                    pending_futures.pop(future)
-                    idx_result, emb = future.result()  # Will raise if _embed_single_text raised
-                    results[idx_result] = emb
-                    completed += 1
-
-                    # Log progress every 100 completions
-                    if completed % 100 == 0 or completed == total:
-                        logger.info(f"  [{completed}/{total}]")
-
-                # Submit new tasks to fill slots (up to max_outstanding)
-                while len(pending_futures) < max_outstanding:
-                    try:
-                        i, text = next(text_iter)
-                        future = executor.submit(_embed_single_text, i, text, retries, total)
-                        pending_futures[future] = i
-                    except StopIteration:
-                        # No more texts to process
-                        break
+                # Log progress every 100 completions or at end
+                if completed % 100 == 0 or completed == total:
+                    logger.info(f"  [{completed}/{total}]")
 
     except Exception as e:
         # If batching fails, log and re-raise
