@@ -7,7 +7,7 @@ name = "clockify-rag"
 version = "5.9.1"
 description = "Production-ready RAG system with Apple Silicon support, hybrid retrieval, and modular architecture"
 readme = "README.md"
-requires-python = ">=3.11,<3.12"
+requires-python = ">=3.11,<3.15"
 license = { text = "MIT" }
 authors = [
     { name = "Clockify Team", email = "support@clockify.me" }
@@ -73,6 +73,7 @@ dependencies = [
     # Utilities
     "typing_extensions>=4.8.0,<5.0.0",
     "psutil>=5.9.0,<6.0.0",
+    "PyYAML>=6.0.0,<7.0.0",
 ]
 
 [project.optional-dependencies]

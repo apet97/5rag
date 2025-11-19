@@ -1,0 +1,173 @@
+# Clockify RAG Configuration File
+#
+# This file contains default configuration values for the RAG system.
+# You can override these values using environment variables with the RAG_ prefix.
+#
+# Example: To override llm.endpoint, set environment variable:
+#   export RAG_OLLAMA_URL="http://your-custom-endpoint:11434"
+#
+# Load custom config with:
+#   ragctl --config-file config/production.yaml query "question"
+#   export RAG_CONFIG_FILE=config/production.yaml
+
+# ============================================================================
+# LLM Configuration
+# ============================================================================
+llm:
+  # Ollama endpoint (ENVIRONMENT-SPECIFIC - change for your deployment)
+  # Examples:
+  #   - Local Ollama: "http://127.0.0.1:11434"
+  #   - Company VPN:  "http://10.127.0.192:11434"
+  #   - Custom:       "http://your-host:port"
+  # Override with: export RAG_OLLAMA_URL="http://your-endpoint:11434"
+  endpoint: "http://10.127.0.192:11434"  # Default: Company VPN (change for your environment)
+
+  # Primary chat model
+  chat_model: "qwen2.5:32b"
+
+  # Embedding model
+  embed_model: "nomic-embed-text:latest"
+
+  # Fallback configuration
+  fallback:
+    enabled: true
+    model: "gpt-oss:20b"
+
+  # Timeouts (seconds)
+  timeouts:
+    chat_connect: 3
+    chat_read: 120
+    embed_connect: 3
+    embed_read: 60
+
+# ============================================================================
+# Retrieval Configuration
+# ============================================================================
+retrieval:
+  # Number of candidates to retrieve before reranking
+  top_k: 15
+
+  # Number of final chunks to pack into LLM context
+  pack_top: 8
+
+  # Minimum similarity threshold (0-1)
+  threshold: 0.25
+
+  # Hybrid fusion alpha (0=pure dense, 1=pure BM25)
+  alpha: 0.5
+
+  # MMR diversification lambda (0=pure diversity, 1=pure relevance)
+  mmr_lambda: 0.75
+
+  # FAISS candidate multiplier (top_k * multiplier candidates before reranking)
+  faiss_multiplier: 3
+
+  # Intent-based alpha adjustment
+  intent_adjustment:
+    enabled: true
+    procedural: 0.65  # "How do I..." queries
+    factual: 0.35     # "What is..." queries
+    pricing: 0.70     # "How much..." queries
+
+# ============================================================================
+# Embedding Configuration
+# ============================================================================
+embedding:
+  # Backend: "local" or "ollama"
+  backend: "ollama"
+
+  # Local backend settings
+  local:
+    model: "sentence-transformers/all-MiniLM-L6-v2"
+    dimension: 384
+    batch_size: 32
+
+  # Ollama backend settings
+  ollama:
+    dimension: 768
+    batch_size: 10
+
+# ============================================================================
+# Index Configuration
+# ============================================================================
+index:
+  # FAISS configuration
+  faiss:
+    # FAISS mode: "faiss", "hnsw", or "none" (linear scan)
+    enabled: true
+    nlist: 64       # Number of clusters (M1-optimized)
+    nprobe: 16      # Number of clusters to search
+
+  # BM25 configuration
+  bm25:
+    k1: 1.2
+    b: 0.65
+
+# ============================================================================
+# API Configuration
+# ============================================================================
+api:
+  # Server settings
+  host: "0.0.0.0"
+  port: 8000
+
+  # Authentication
+  auth:
+    enabled: false
+    mode: "api_key"  # "api_key" or "none"
+    header_name: "x-api-key"
+    # Set allowed keys via environment: RAG_API_ALLOWED_KEYS="key1,key2,key3"
+
+  # CORS settings
+  cors:
+    enabled: true
+    origins: ["*"]
+
+  # Rate limiting
+  rate_limit:
+    enabled: true
+    requests_per_minute: 60
+
+# ============================================================================
+# Logging Configuration
+# ============================================================================
+logging:
+  # Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
+  level: "INFO"
+
+  # Log format: "json" or "text"
+  format: "json"
+
+  # Enable request logging
+  log_requests: true
+
+# ============================================================================
+# Caching Configuration
+# ============================================================================
+cache:
+  # Query cache
+  query_cache:
+    enabled: true
+    max_size: 100
+    ttl_seconds: 3600  # 1 hour
+
+  # Embedding cache
+  embedding_cache:
+    enabled: true
+    # Cache persisted in var/emb_cache.jsonl
+
+# ============================================================================
+# Data Paths
+# ============================================================================
+paths:
+  # Knowledge base input
+  knowledge_base: "knowledge_full.md"
+
+  # Index storage directory
+  index_dir: "var"
+
+  # Evaluation datasets
+  eval_dir: "eval_datasets"
+
+  # Reports output
+  reports_dir: "var/reports"

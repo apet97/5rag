@@ -46,6 +46,7 @@ from .confidence_routing import get_routing_action
 from .metrics import MetricNames
 from . import metrics as metrics_module
 from .utils import sanitize_for_log
+from .request_context import get_request_id
 
 logger = logging.getLogger(__name__)
 
@@ -319,6 +320,111 @@ def generate_llm_answer(
     return answer, timing, confidence
 
 
+def _handle_coverage_failure(
+    question_hash: str,
+    selected: List[int],
+    threshold: float,
+    t_start: float,
+    retrieve_time: float,
+) -> Dict[str, Any]:
+    """Handle coverage check failure."""
+    metrics = metrics_module.get_metrics()
+    metrics.increment_counter(MetricNames.ERRORS_TOTAL, labels={"type": "coverage"})
+    metrics.increment_counter(MetricNames.REFUSALS_TOTAL, labels={"reason": "coverage"})
+    total_time = time.time() - t_start
+    metrics.observe_histogram(MetricNames.QUERY_LATENCY, total_time * 1000)
+    metrics.observe_histogram(MetricNames.RETRIEVAL_LATENCY, retrieve_time * 1000)
+    logger.warning(
+        json.dumps(
+            {
+                "event": "rag.query.coverage_failure",
+                "question_hash": question_hash,
+                "selected": len(selected),
+                "threshold": threshold,
+            }
+        )
+    )
+    return {
+        "answer": REFUSAL_STR,
+        "refused": True,
+        "confidence": None,
+        "selected_chunks": [],
+        "packed_chunks": [],
+        "context_block": "",
+        "timing": {
+            "total_ms": total_time * 1000,
+            "retrieve_ms": retrieve_time * 1000,
+            "mmr_ms": 0,
+            "rerank_ms": 0,
+            "llm_ms": 0,
+        },
+        "metadata": {"retrieval_count": len(selected), "coverage_check": "failed"},
+        "routing": get_routing_action(None, refused=True, critical=False),
+    }
+
+
+def _handle_llm_failure(
+    reason: str,
+    error: Exception,
+    question_hash: str,
+    selected: List[int],
+    mmr_selected: List[int],
+    context_block: str,
+    packed_ids: List[Any],
+    used_tokens: int,
+    rerank_applied: bool,
+    rerank_reason: str,
+    t_start: float,
+    retrieve_time: float,
+    mmr_time: float,
+    rerank_time: float,
+    _normalize_chunk_ids: Any,
+) -> Dict[str, Any]:
+    """Handle LLM generation failure."""
+    metrics = metrics_module.get_metrics()
+    total_time = time.time() - t_start
+    metrics.increment_counter(MetricNames.ERRORS_TOTAL, labels={"type": reason})
+    metrics.increment_counter(MetricNames.REFUSALS_TOTAL, labels={"reason": reason})
+    logger.error(
+        json.dumps(
+            {
+                "event": "rag.query.failure",
+                "reason": reason,
+                "question_hash": question_hash,
+                "message": str(error),
+            }
+        )
+    )
+    metrics.observe_histogram(MetricNames.QUERY_LATENCY, total_time * 1000)
+    metrics.observe_histogram(MetricNames.RETRIEVAL_LATENCY, retrieve_time * 1000)
+    return {
+        "answer": REFUSAL_STR,
+        "refused": True,
+        "confidence": None,
+        "selected_chunks": _normalize_chunk_ids(selected),
+        "packed_chunks": _normalize_chunk_ids(mmr_selected),
+        "context_block": context_block,
+        "timing": {
+            "total_ms": total_time * 1000,
+            "retrieve_ms": retrieve_time * 1000,
+            "mmr_ms": mmr_time * 1000,
+            "rerank_ms": rerank_time * 1000,
+            "llm_ms": 0,
+        },
+        "metadata": {
+            "retrieval_count": len(selected),
+            "packed_count": len(packed_ids),
+            "used_tokens": used_tokens,
+            "rerank_applied": rerank_applied,
+            "rerank_reason": rerank_reason,
+            "llm_error": reason,
+            "llm_error_msg": str(error),
+            "source_chunk_ids": _normalize_chunk_ids(packed_ids),
+        },
+        "routing": get_routing_action(None, refused=True, critical=True),
+    }
+
+
 def answer_once(
     question: str,
     chunks: List[Dict],
@@ -367,21 +473,43 @@ def answer_once(
                 normalized.append(item)
         return normalized
 
-    metrics.increment_counter(MetricNames.QUERIES_TOTAL)
-    question_preview = sanitize_for_log(question, max_length=200)
-    question_hash = hashlib.sha256(question.encode("utf-8")).hexdigest()[:12]
-    logger.info(
-        json.dumps(
-            {
-                "event": "rag.query.start",
-                "question_hash": question_hash,
-                "question_preview": question_preview,
-                "top_k": top_k,
-                "pack_top": pack_top,
-            }
-        )
-    )
+def prepare_context_pipeline(
+    question: str,
+    chunks: List[Dict],
+    vecs_n: np.ndarray,
+    bm: Dict,
+    hnsw=None,
+    top_k: int = DEFAULT_TOP_K,
+    pack_top: int = DEFAULT_PACK_TOP,
+    threshold: float = DEFAULT_THRESHOLD,
+    use_rerank: bool = False,
+    seed: int = DEFAULT_SEED,
+    num_ctx: int = DEFAULT_NUM_CTX,
+    num_predict: int = DEFAULT_NUM_PREDICT,
+    retries: int = DEFAULT_RETRIES,
+    faiss_index_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Execute the retrieval and context preparation pipeline.
 
+    Shared by both synchronous `answer_once` and asynchronous `async_answer_once`.
+
+    Returns:
+        Dict containing:
+        - success: bool (True if context ready, False if coverage failed)
+        - context_block: str (packed context)
+        - packed_ids: List (ids of packed chunks)
+        - used_tokens: int
+        - selected: List[int] (initial retrieval indices)
+        - mmr_selected: List[int] (after MMR)
+        - rerank_applied: bool
+        - rerank_reason: str
+        - timing: Dict[str, float] (retrieve_ms, mmr_ms, rerank_ms)
+        - failure_response: Optional[Dict] (if success=False)
+        - question_hash: str
+    """
+    t_start = time.time()
+    question_hash = hashlib.sha256(question.encode("utf-8")).hexdigest()[:12]
+    
     # Retrieve
     t0 = time.time()
     selected, scores = retrieve(
@@ -391,38 +519,8 @@ def answer_once(
 
     # Check coverage
     if not coverage_ok(selected, scores["dense"], threshold):
-        metrics.increment_counter(MetricNames.ERRORS_TOTAL, labels={"type": "coverage"})
-        metrics.increment_counter(MetricNames.REFUSALS_TOTAL, labels={"reason": "coverage"})
-        total_time = time.time() - t_start
-        metrics.observe_histogram(MetricNames.QUERY_LATENCY, total_time * 1000)
-        metrics.observe_histogram(MetricNames.RETRIEVAL_LATENCY, retrieve_time * 1000)
-        logger.warning(
-            json.dumps(
-                {
-                    "event": "rag.query.coverage_failure",
-                    "question_hash": question_hash,
-                    "selected": len(selected),
-                    "threshold": threshold,
-                }
-            )
-        )
-        return {
-            "answer": REFUSAL_STR,
-            "refused": True,
-            "confidence": None,
-            "selected_chunks": [],
-            "packed_chunks": [],
-            "context_block": "",
-            "timing": {
-                "total_ms": (time.time() - t_start) * 1000,
-                "retrieve_ms": retrieve_time * 1000,
-                "mmr_ms": 0,
-                "rerank_ms": 0,
-                "llm_ms": 0,
-            },
-            "metadata": {"retrieval_count": len(selected), "coverage_check": "failed"},
-            "routing": get_routing_action(None, refused=True, critical=False),
-        }
+        failure = _handle_coverage_failure(question_hash, selected, threshold, t_start, retrieve_time)
+        return {"success": False, "failure_response": failure}
 
     # Apply MMR diversification
     t0 = time.time()
@@ -443,54 +541,117 @@ def answer_once(
     )
 
     # Pack snippets with provider-specific budget
-    # GPT-OSS uses 16k token budget (vs 12k for qwen) to leverage 128k context window
     budget_tokens = get_context_budget()
     context_block, packed_ids, used_tokens = pack_snippets(
         chunks, mmr_selected, pack_top=pack_top, budget_tokens=budget_tokens, num_ctx=num_ctx
     )
 
-    def _llm_failure(reason: str, error: Exception) -> Dict[str, Any]:
-        total_time = time.time() - t_start
-        metrics.increment_counter(MetricNames.ERRORS_TOTAL, labels={"type": reason})
-        metrics.increment_counter(MetricNames.REFUSALS_TOTAL, labels={"reason": reason})
-        logger.error(
-            json.dumps(
-                {
-                    "event": "rag.query.failure",
-                    "reason": reason,
-                    "question_hash": question_hash,
-                    "message": str(error),
-                }
-            )
+    return {
+        "success": True,
+        "context_block": context_block,
+        "packed_ids": packed_ids,
+        "used_tokens": used_tokens,
+        "selected": selected,
+        "mmr_selected": mmr_selected,
+        "rerank_applied": rerank_applied,
+        "rerank_reason": rerank_reason,
+        "timing": {
+            "retrieve_ms": retrieve_time * 1000,
+            "mmr_ms": mmr_time * 1000,
+            "rerank_ms": rerank_time * 1000,
+        },
+        "question_hash": question_hash,
+        "t_start": t_start,  # Pass start time for total latency calc
+    }
+
+
+def answer_once(
+    question: str,
+    chunks: List[Dict],
+    vecs_n: np.ndarray,
+    bm: Dict,
+    hnsw=None,
+    top_k: int = DEFAULT_TOP_K,
+    pack_top: int = DEFAULT_PACK_TOP,
+    threshold: float = DEFAULT_THRESHOLD,
+    use_rerank: bool = False,
+    seed: int = DEFAULT_SEED,
+    num_ctx: int = DEFAULT_NUM_CTX,
+    num_predict: int = DEFAULT_NUM_PREDICT,
+    retries: int = DEFAULT_RETRIES,
+    faiss_index_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Complete answer generation pipeline.
+
+    Args:
+        question: User question
+        chunks: List of all chunks
+        vecs_n: Normalized embedding vectors
+        bm: BM25 index
+        hnsw: Optional HNSW index
+        top_k: Number of candidates to retrieve
+        pack_top: Number of chunks to pack in context
+        threshold: Minimum similarity threshold
+        use_rerank: Whether to apply LLM reranking
+        seed, num_ctx, num_predict, retries: LLM parameters
+        faiss_index_path: Path to FAISS index file
+
+    Returns:
+        Dict with answer and metadata
+    """
+    metrics = metrics_module.get_metrics()
+    metrics.increment_counter(MetricNames.QUERIES_TOTAL)
+    
+    question_preview = sanitize_for_log(question, max_length=200)
+    # Note: question_hash is re-calculated in pipeline, but we log start here.
+    # Ideally we'd move logging into pipeline or after, but start log is useful.
+    # We'll let pipeline calc hash again or just calc it here too if needed.
+    # For consistency, let's just log here.
+    
+    # Prepare context (Retrieve -> MMR -> Rerank -> Pack)
+    ctx = prepare_context_pipeline(
+        question, chunks, vecs_n, bm, hnsw, top_k, pack_top, threshold,
+        use_rerank, seed, num_ctx, num_predict, retries, faiss_index_path
+    )
+
+    if not ctx["success"]:
+        return ctx["failure_response"]
+
+    # Unpack context results
+    context_block = ctx["context_block"]
+    packed_ids = ctx["packed_ids"]
+    used_tokens = ctx["used_tokens"]
+    selected = ctx["selected"]
+    mmr_selected = ctx["mmr_selected"]
+    rerank_applied = ctx["rerank_applied"]
+    rerank_reason = ctx["rerank_reason"]
+    timing = ctx["timing"]
+    question_hash = ctx["question_hash"]
+    t_start = ctx["t_start"]
+
+    logger.info(
+        json.dumps(
+            {
+                "event": "rag.query.start",
+                "request_id": get_request_id(),
+                "question_hash": question_hash,
+                "question_preview": question_preview,
+                "top_k": top_k,
+                "pack_top": pack_top,
+            }
         )
-        metrics.observe_histogram(MetricNames.QUERY_LATENCY, total_time * 1000)
-        metrics.observe_histogram(MetricNames.RETRIEVAL_LATENCY, retrieve_time * 1000)
-        return {
-            "answer": REFUSAL_STR,
-            "refused": True,
-            "confidence": None,
-            "selected_chunks": _normalize_chunk_ids(selected),
-            "packed_chunks": _normalize_chunk_ids(mmr_selected),
-            "context_block": context_block,
-            "timing": {
-                "total_ms": total_time * 1000,
-                "retrieve_ms": retrieve_time * 1000,
-                "mmr_ms": mmr_time * 1000,
-                "rerank_ms": rerank_time * 1000,
-                "llm_ms": 0,
-            },
-            "metadata": {
-                "retrieval_count": len(selected),
-                "packed_count": len(packed_ids),
-                "used_tokens": used_tokens,
-                "rerank_applied": rerank_applied,
-                "rerank_reason": rerank_reason,
-                "llm_error": reason,
-                "llm_error_msg": str(error),
-                "source_chunk_ids": _normalize_chunk_ids(packed_ids),
-            },
-            "routing": get_routing_action(None, refused=True, critical=True),
-        }
+    )
+
+    def _normalize_chunk_ids(seq: Optional[List]) -> List:
+        if not seq:
+            return []
+        normalized: List = []
+        for item in seq:
+            if isinstance(item, np.generic):
+                normalized.append(item.item())
+            else:
+                normalized.append(item)
+        return normalized
 
     # Generate answer
     try:
@@ -504,15 +665,25 @@ def answer_once(
             packed_ids=packed_ids,
         )
     except LLMUnavailableError as exc:
-        logger.error(f"LLM unavailable during answer generation: {exc}")
-        return _llm_failure("llm_unavailable", exc)
+        logger.error(f"LLM unavailable during answer generation | request_id={get_request_id()} | error={exc}")
+        return _handle_llm_failure(
+            "llm_unavailable", exc, question_hash, selected, mmr_selected, context_block,
+            packed_ids, used_tokens, rerank_applied, rerank_reason, t_start,
+            timing["retrieve_ms"] / 1000, timing["mmr_ms"] / 1000, timing["rerank_ms"] / 1000,
+            _normalize_chunk_ids
+        )
     except LLMError as exc:
-        logger.error(f"LLM error during answer generation: {exc}")
-        return _llm_failure("llm_error", exc)
+        logger.error(f"LLM error during answer generation | request_id={get_request_id()} | error={exc}")
+        return _handle_llm_failure(
+            "llm_error", exc, question_hash, selected, mmr_selected, context_block,
+            packed_ids, used_tokens, rerank_applied, rerank_reason, t_start, 
+            timing["retrieve_ms"] / 1000, timing["mmr_ms"] / 1000, timing["rerank_ms"] / 1000, 
+            _normalize_chunk_ids
+        )
 
     total_time = time.time() - t_start
     metrics.observe_histogram(MetricNames.QUERY_LATENCY, total_time * 1000)
-    metrics.observe_histogram(MetricNames.RETRIEVAL_LATENCY, retrieve_time * 1000)
+    metrics.observe_histogram(MetricNames.RETRIEVAL_LATENCY, timing["retrieve_ms"])
     metrics.observe_histogram(MetricNames.LLM_LATENCY, llm_time * 1000)
 
     refused = answer == REFUSAL_STR
@@ -523,6 +694,7 @@ def answer_once(
         json.dumps(
             {
                 "event": "rag.query.complete",
+                "request_id": get_request_id(),
                 "question_hash": question_hash,
                 "refused": refused,
                 "selected": len(selected),
@@ -548,9 +720,9 @@ def answer_once(
         "context_block": context_block,
         "timing": {
             "total_ms": total_time * 1000,
-            "retrieve_ms": retrieve_time * 1000,
-            "mmr_ms": mmr_time * 1000,
-            "rerank_ms": rerank_time * 1000,
+            "retrieve_ms": timing["retrieve_ms"],
+            "mmr_ms": timing["mmr_ms"],
+            "rerank_ms": timing["rerank_ms"],
             "llm_ms": llm_time * 1000,
         },
         "metadata": {

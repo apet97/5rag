@@ -6,7 +6,7 @@ A production-grade Retrieval-Augmented Generation (RAG) system for Clockify docu
 
 ## Key Features
 
-- ✅ **Zero-Config**: Works out-of-box with company VPN endpoint
+- ✅ **Flexible Configuration**: Supports local Ollama, VPN endpoints, or custom deployments
 - ✅ **Automatic Fallback**: Qwen 2.5 32B → GPT-OSS-20B on connection/timeout/5xx errors
 - ✅ **Hybrid Retrieval**: BM25 (keyword) + Dense (semantic) + MMR (diversity)
 - ✅ **Apple Silicon**: Optimized for M1/M2/M3 Macs with MPS acceleration
@@ -15,10 +15,19 @@ A production-grade Retrieval-Augmented Generation (RAG) system for Clockify docu
 
 ## 🚀 Quick Start (90 Seconds)
 
-### Zero-Config Path (Recommended)
+### Quick Start Path
 
-**No environment variables needed!** Just run:
+**⚠️  Configure your endpoint first:**
+```bash
+# Choose your environment profile:
+export RAG_OLLAMA_URL="http://127.0.0.1:11434"       # Local Ollama
+# OR
+export RAG_OLLAMA_URL="http://10.127.0.192:11434"    # Company VPN
+# OR
+export RAG_OLLAMA_URL="http://your-host:port"        # Custom endpoint
+```
 
+Then run:
 ```bash
 git clone https://github.com/apet97/1rag.git
 cd 1rag
@@ -27,8 +36,8 @@ make build    # Build index (5-10 min)
 make chat     # Start interactive CLI
 ```
 
-**Default Configuration:**
-- LLM endpoint: `http://10.127.0.192:11434` (company VPN)
+**Default Configuration** (if RAG_OLLAMA_URL not set):
+- LLM endpoint: `http://10.127.0.192:11434` (⚠️  Company VPN only - change for your environment)
 - Chat model: `qwen2.5:32b`
 - Embed model: `nomic-embed-text:latest`
 - Fallback: `gpt-oss:20b` (automatic on primary failure)
@@ -52,7 +61,7 @@ pip install -e '.[dev]'
 ```
 
 For detailed installation guides, see:
-- **Mac M1**: [QUICKSTART.md](QUICKSTART.md) or [docs/platform/M1_COMPATIBILITY.md](docs/platform/M1_COMPATIBILITY.md)
+- **Mac M1**: [docs/platform/M1_COMPATIBILITY.md](docs/platform/M1_COMPATIBILITY.md)
 - **Linux**: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
 - **Docker**: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
 
@@ -60,12 +69,38 @@ For detailed installation guides, see:
 
 **Only needed if you want to override defaults.** See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for complete reference.
 
+### Option 1: YAML Config File (Recommended for Complex Setups)
+
+Create a custom config file based on `config/default.yaml`:
+
+```bash
+# View current effective configuration
+ragctl config-show
+
+# Use custom config file
+cp config/default.yaml config/my-config.yaml
+# Edit config/my-config.yaml with your settings
+export RAG_CONFIG_FILE=config/my-config.yaml
+
+# Or specify per-command
+ragctl --config-file config/my-config.yaml query "How do I track time?"
+```
+
+**Config Precedence** (highest to lowest):
+1. Environment variables (`RAG_*` prefix)
+2. Custom config file (`--config-file` or `RAG_CONFIG_FILE`)
+3. Default config (`config/default.yaml`)
+4. Hardcoded defaults in `config.py`
+
+### Option 2: Environment Variables (Quick Override)
+
 ```bash
 # Example: Use local Ollama instead of company VPN endpoint
 export RAG_OLLAMA_URL=http://127.0.0.1:11434
 
-# Example: Use GPT-OSS-20B instead of qwen
-export RAG_PROVIDER=gpt-oss
+# Example: Adjust retrieval parameters
+export RAG_TOP_K=20
+export RAG_HYBRID_ALPHA=0.3  # More semantic, less keyword matching
 
 # Example: Disable fallback (fail fast)
 export RAG_FALLBACK_ENABLED=false
@@ -92,7 +127,7 @@ make eval-gate            # Retrieval quality thresholds (MRR/NDCG)
 ## 📚 Documentation
 
 **Getting Started:**
-- [QUICKSTART.md](QUICKSTART.md) – Mac M1 Pro 5-minute setup guide
+- [docs/README.md](docs/README.md) – Documentation index
 - [docs/README.md](docs/README.md) – Documentation index
 
 **Core Guides:**
@@ -109,7 +144,7 @@ make eval-gate            # Retrieval quality thresholds (MRR/NDCG)
 - [docs/platform/INSTALL_macOS_ARM64.md](docs/platform/INSTALL_macOS_ARM64.md) – M1 installation details
 
 **Reference:**
-- [CLAUDE.md](CLAUDE.md) – Claude Code assistant instructions
+- [docs/reference/PROJECT_STRUCTURE.md](docs/reference/PROJECT_STRUCTURE.md) – Codebase structure
 - [docs/reference/PROJECT_STRUCTURE.md](docs/reference/PROJECT_STRUCTURE.md) – Codebase structure
 - [docs/reference/FAQ_CACHE_USAGE.md](docs/reference/FAQ_CACHE_USAGE.md) – Cache usage FAQ
 

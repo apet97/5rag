@@ -286,7 +286,18 @@ class OllamaAPIClient(BaseLLMClient):
                 self.base_url,
                 e,
             )
-            raise LLMUnavailableError(f"Chat completion connection error for model {model}") from e
+            # NOTE: URL exposure in error messages is intentional for troubleshooting.
+            # This helps operators diagnose connectivity issues on internal networks.
+            # The endpoint URL (http://10.127.0.192:11434) is hardcoded for internal use only.
+            troubleshooting = (
+                f"Chat completion connection error for model {model}.\n"
+                f"\nTroubleshooting steps:\n"
+                f"  1. Check if Ollama is running: curl {self.base_url}/api/tags\n"
+                f"  2. Verify VPN connection (endpoint: {self.base_url})\n"
+                f"  3. Test model availability: curl {self.base_url}/api/show -d '{{'model': '{model}'}}'\n"
+                f"  4. Check network: ping {self.base_url.split('//')[1].split(':')[0]}"
+            )
+            raise LLMUnavailableError(troubleshooting) from e
         except requests.exceptions.HTTPError as e:
             status = getattr(e.response, "status_code", getattr(response, "status_code", "unknown"))
             # Treat 5xx server errors as unavailable (triggers fallback)
@@ -430,7 +441,16 @@ class OllamaAPIClient(BaseLLMClient):
                 self.base_url,
                 e,
             )
-            raise EmbeddingError(f"Embedding creation connection error for model {model}") from e
+            # NOTE: URL exposure in error messages is intentional for troubleshooting.
+            troubleshooting = (
+                f"Embedding creation connection error for model {model}.\n"
+                f"\nTroubleshooting steps:\n"
+                f"  1. Check if Ollama is running: curl {self.base_url}/api/tags\n"
+                f"  2. Verify VPN connection (endpoint: {self.base_url})\n"
+                f"  3. Verify embedding model: ollama list | grep {model}\n"
+                f"  4. Try local backend instead: export EMB_BACKEND=local"
+            )
+            raise EmbeddingError(troubleshooting) from e
         except requests.exceptions.HTTPError as e:
             status = getattr(e.response, "status_code", getattr(response, "status_code", "unknown"))
             logger.error(
@@ -972,9 +992,19 @@ def chat_completion(
             logger.debug("No fallback client available, re-raising LLMUnavailableError")
             raise
 
-        # Log fallback event
+        # Log fallback event with structured information
+        fallback_start = time.time()
+
         logger.warning(
-            "Primary LLM unavailable (%s), falling back to %s (model=%s)", e, RAG_FALLBACK_PROVIDER, RAG_FALLBACK_MODEL
+            "🔄 LLM FALLBACK TRIGGERED | "
+            "primary_error=%s | "
+            "fallback_provider=%s | "
+            "fallback_model=%s | "
+            "original_model=%s",
+            str(e)[:100],  # Truncate long error messages
+            RAG_FALLBACK_PROVIDER,
+            RAG_FALLBACK_MODEL,
+            model or "default"
         )
 
         # Use fallback model if no specific model was requested
@@ -989,10 +1019,28 @@ def chat_completion(
                 timeout=timeout,
                 retries=retries,
             )
-            logger.info("Fallback successful: %s answered with model=%s", RAG_FALLBACK_PROVIDER, fallback_model)
+            fallback_duration = time.time() - fallback_start
+            logger.info(
+                "✅ LLM FALLBACK SUCCEEDED | "
+                "provider=%s | "
+                "model=%s | "
+                "latency_ms=%.0f",
+                RAG_FALLBACK_PROVIDER,
+                fallback_model,
+                fallback_duration * 1000
+            )
             return response
         except Exception as fallback_error:
-            logger.error("Fallback also failed (%s): %s", RAG_FALLBACK_PROVIDER, fallback_error)
+            logger.error(
+                "❌ LLM FALLBACK FAILED | "
+                "provider=%s | "
+                "model=%s | "
+                "error=%s | "
+                "both_llms_unavailable=true",
+                RAG_FALLBACK_PROVIDER,
+                fallback_model,
+                str(fallback_error)[:100]
+            )
             # Re-raise the original error with context about fallback failure
             raise LLMUnavailableError(
                 f"Both primary and fallback LLM unavailable. "

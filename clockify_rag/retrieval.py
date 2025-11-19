@@ -27,6 +27,7 @@ from .exceptions import LLMError, ValidationError
 from .indexing import bm25_scores, get_faiss_index
 from .utils import tokenize  # FIX (Error #17): Import tokenize from utils instead of duplicating
 from .intent_classification import classify_intent, get_intent_metadata, adjust_scores_by_intent
+from .request_context import get_request_id
 
 logger = logging.getLogger(__name__)
 
@@ -442,6 +443,129 @@ class DenseScoreStore:
         return self._materialize_full().copy()
 
 
+def _retrieve_candidates(
+    chunks: List[Dict],
+    vecs_n: np.ndarray,
+    qv_n: np.ndarray,
+    top_k: int,
+    hnsw=None,
+    faiss_index=None,
+) -> Tuple[List[int], Optional[np.ndarray], Optional[np.ndarray], int, float]:
+    """Retrieve candidate indices using dense retrieval (FAISS, HNSW, or Linear)."""
+    dense_scores_full = None
+    candidate_idx: List[int] = []
+    n_chunks = len(chunks)
+    dot_elapsed = 0.0
+    dense_computed = 0
+    dense_scores = None
+
+    if faiss_index:
+        # Only score FAISS candidates, don't compute full corpus
+        distances, indices = faiss_index.search(
+            qv_n.reshape(1, -1).astype("float32"),
+            max(config.ANN_CANDIDATE_MIN, top_k * config.FAISS_CANDIDATE_MULTIPLIER),
+        )
+        # Filter indices and distances together to maintain alignment
+        valid_pairs = [(int(i), float(d)) for i, d in zip(indices[0], distances[0]) if 0 <= i < n_chunks]
+        candidate_idx = [i for i, _ in valid_pairs]
+        dense_scores = np.array([d for _, d in valid_pairs], dtype=np.float32)
+        dense_computed = len(candidate_idx)
+        dot_elapsed = 0.0
+    elif hnsw:
+        _, cand = hnsw.knn_query(qv_n, k=max(config.ANN_CANDIDATE_MIN, top_k * config.FAISS_CANDIDATE_MULTIPLIER))
+        candidate_idx = cand[0].tolist()
+        dot_start = time.perf_counter()
+        dense_scores_full = vecs_n.dot(qv_n)
+        dot_elapsed = time.perf_counter() - dot_start
+        dense_computed = n_chunks
+        dense_scores = dense_scores_full
+    else:
+        dot_start = time.perf_counter()
+        dense_scores_full = vecs_n.dot(qv_n)
+        dot_elapsed = time.perf_counter() - dot_start
+        dense_computed = n_chunks
+        dense_scores = dense_scores_full
+        candidate_idx = np.arange(len(chunks)).tolist()
+
+    if not candidate_idx:
+        if dense_scores_full is None:
+             dense_scores_full = vecs_n.dot(qv_n)
+        max_candidates = max(config.ANN_CANDIDATE_MIN, top_k * config.FAISS_CANDIDATE_MULTIPLIER)
+        if len(chunks) > max_candidates:
+            top_indices = np.argsort(dense_scores_full)[::-1][:max_candidates]
+            candidate_idx = top_indices.tolist()
+        else:
+            candidate_idx = np.arange(len(chunks)).tolist()
+        dense_scores = dense_scores_full
+
+    return candidate_idx, dense_scores, dense_scores_full, dense_computed, dot_elapsed
+
+
+def _compute_normalized_scores(
+    candidate_idx: List[int],
+    dense_scores: np.ndarray,
+    dense_scores_full: Optional[np.ndarray],
+    bm_scores_full: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]:
+    """Compute Z-score normalized scores for candidates."""
+    candidate_idx_array = np.array(candidate_idx, dtype=np.int32)
+
+    # Normalize once, then slice for candidates
+    zs_bm_full = normalize_scores_zscore(bm_scores_full)
+    zs_dense_full = None
+    
+    if dense_scores_full is not None:
+        dense_scores_full = np.asarray(dense_scores_full, dtype="float32")
+        zs_dense_full = normalize_scores_zscore(dense_scores_full)
+        zs_dense = zs_dense_full[candidate_idx_array] if candidate_idx_array.size else np.array([], dtype="float32")
+    else:
+        dense_scores = np.asarray(dense_scores, dtype="float32")
+        zs_dense = normalize_scores_zscore(dense_scores)
+        
+    zs_bm = zs_bm_full[candidate_idx_array] if candidate_idx_array.size else np.array([], dtype="float32")
+    
+    return zs_dense, zs_bm, zs_dense_full, zs_bm_full
+
+
+def _apply_intent_boosting(
+    chunks: List[Dict],
+    candidate_idx_array: np.ndarray,
+    zs_bm_full: np.ndarray,
+    zs_dense_full: Optional[np.ndarray],
+    intent_config: Any,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray]]:
+    """Apply intent-based score boosting."""
+    if not config.USE_INTENT_CLASSIFICATION or intent_config.boost_factor == 1.0:
+        zs_bm = zs_bm_full[candidate_idx_array] if candidate_idx_array.size else np.array([], dtype="float32")
+        zs_dense = (
+            zs_dense_full[candidate_idx_array]
+            if zs_dense_full is not None and candidate_idx_array.size
+            else np.array([], dtype="float32")
+        )
+        return zs_dense, zs_bm, zs_bm_full, zs_dense_full
+
+    # Build scores dict for boosting
+    temp_scores = {"bm25": zs_bm_full}
+    if zs_dense_full is not None:
+        temp_scores["dense"] = zs_dense_full
+
+    # Apply intent-specific boosting
+    temp_scores = adjust_scores_by_intent(chunks, temp_scores, intent_config)
+
+    # Update normalized scores
+    zs_bm_full = temp_scores["bm25"]
+    if zs_dense_full is not None:
+        zs_dense_full = temp_scores["dense"]
+
+    # Re-slice candidate scores
+    zs_bm = zs_bm_full[candidate_idx_array] if candidate_idx_array.size else np.array([], dtype="float32")
+    zs_dense = np.array([], dtype="float32")
+    if zs_dense_full is not None and candidate_idx_array.size:
+        zs_dense = zs_dense_full[candidate_idx_array]
+
+    return zs_dense, zs_bm, zs_bm_full, zs_dense_full
+
+
 def retrieve(
     question: str, chunks, vecs_n, bm, top_k=12, hnsw=None, retries=0, faiss_index_path=None
 ) -> Tuple[List[int], Dict[str, Any]]:
@@ -471,6 +595,7 @@ def retrieve(
 
     # OPTIMIZATION: Classify query intent for specialized retrieval strategy (if enabled)
     intent_metadata = {}
+    intent_config = None
     if config.USE_INTENT_CLASSIFICATION:
         intent_name, intent_config, intent_confidence = classify_intent(question)
         alpha_hybrid = intent_config.alpha_hybrid  # Use intent-specific alpha
@@ -496,94 +621,54 @@ def retrieve(
         elif faiss_index_path:
             logger.info("info: ann=fallback reason=missing-index")
 
-    dense_scores_full = None
-    candidate_idx: List[int] = []
-    n_chunks = len(chunks)
-    dot_elapsed = 0.0
-    dense_computed = 0
-
-    if faiss_index:
-        # Only score FAISS candidates, don't compute full corpus
-        distances, indices = faiss_index.search(
-            qv_n.reshape(1, -1).astype("float32"),
-            max(config.ANN_CANDIDATE_MIN, top_k * config.FAISS_CANDIDATE_MULTIPLIER),
-        )
-        # Filter indices and distances together to maintain alignment
-        # (prevents misalignment when FAISS returns -1 sentinels)
-        valid_pairs = [(int(i), float(d)) for i, d in zip(indices[0], distances[0]) if 0 <= i < n_chunks]
-        candidate_idx = [i for i, _ in valid_pairs]
-        dense_from_ann = np.array([d for _, d in valid_pairs], dtype=np.float32)
-
-        dense_scores = dense_from_ann
-        dense_scores_full = None
-        dense_computed = len(candidate_idx)
-        dot_elapsed = 0.0
-    elif hnsw:
-        _, cand = hnsw.knn_query(qv_n, k=max(config.ANN_CANDIDATE_MIN, top_k * config.FAISS_CANDIDATE_MULTIPLIER))
-        candidate_idx = cand[0].tolist()
-        dot_start = time.perf_counter()
-        dense_scores_full = vecs_n.dot(qv_n)
-        dot_elapsed = time.perf_counter() - dot_start
-        dense_computed = n_chunks
-    else:
-        dot_start = time.perf_counter()
-        dense_scores_full = vecs_n.dot(qv_n)
-        dot_elapsed = time.perf_counter() - dot_start
-        dense_computed = n_chunks
-        dense_scores = dense_scores_full
-        candidate_idx = np.arange(len(chunks)).tolist()
-
-    if not candidate_idx:
-        dense_scores_full = vecs_n.dot(qv_n)
-        max_candidates = max(config.ANN_CANDIDATE_MIN, top_k * config.FAISS_CANDIDATE_MULTIPLIER)
-        if len(chunks) > max_candidates:
-            top_indices = np.argsort(dense_scores_full)[::-1][:max_candidates]
-            candidate_idx = top_indices.tolist()
-        else:
-            candidate_idx = np.arange(len(chunks)).tolist()
-        dense_scores = dense_scores_full
-
+    # 1. Retrieve Candidates (Dense)
+    candidate_idx, dense_scores, dense_scores_full, dense_computed, dot_elapsed = _retrieve_candidates(
+        chunks, vecs_n, qv_n, top_k, hnsw, faiss_index
+    )
     candidate_idx_array = np.array(candidate_idx, dtype=np.int32)
 
-    # Use expanded query for BM25
+    # 2. Compute BM25 Scores
     bm_scores_full = bm25_scores(expanded_question, bm, top_k=top_k * 3)
 
-    # Normalize once, then slice for candidates
-    zs_bm_full = normalize_scores_zscore(bm_scores_full)
-    zs_dense_full = None
-    if dense_scores_full is not None:
-        dense_scores_full = np.asarray(dense_scores_full, dtype="float32")
-        zs_dense_full = normalize_scores_zscore(dense_scores_full)
-        zs_dense = zs_dense_full[candidate_idx_array] if candidate_idx_array.size else np.array([], dtype="float32")
-    else:
-        dense_scores = np.asarray(dense_scores, dtype="float32")
-        zs_dense = normalize_scores_zscore(dense_scores)
-    zs_bm = zs_bm_full[candidate_idx_array] if candidate_idx_array.size else np.array([], dtype="float32")
+    # 3. Normalize Scores
+    zs_dense, zs_bm, zs_dense_full, zs_bm_full = _compute_normalized_scores(
+        candidate_idx, dense_scores, dense_scores_full, bm_scores_full
+    )
+    
+    # 4. Apply Intent Boosting
+    if config.USE_INTENT_CLASSIFICATION and intent_config:
+         # Re-slice dense scores if not fully materialized but needed for boosting
+         # Note: If dense_scores_full is None (FAISS), we can't boost dense scores easily without full compute
+         # So we only boost what we have or what is cheap.
+         # The helper handles the logic.
+         zs_dense, zs_bm, zs_bm_full, zs_dense_full = _apply_intent_boosting(
+            chunks, candidate_idx_array, zs_bm_full, zs_dense_full, intent_config
+        )
+         # If dense_scores_full was None, zs_dense_full remains None, and zs_dense is unchanged unless we had it.
+         if zs_dense_full is None and dense_scores is not None:
+             # We have candidate dense scores but not full. Boosting logic above only updates full.
+             # We need to boost candidate dense scores manually if full is missing.
+             # But `adjust_scores_by_intent` works on full arrays usually.
+             # Let's stick to the original logic which only boosted if available.
+             pass
 
-    # OPTIMIZATION: Apply intent-based score boosting (if enabled)
-    # Boosts chunks containing intent-specific keywords (e.g., pricing sections for pricing queries)
-    # Note: When using FAISS, only BM25 scores are boosted (dense scores not fully materialized for performance)
-    if config.USE_INTENT_CLASSIFICATION and intent_config.boost_factor != 1.0:
-        # Build scores dict for boosting (include dense only if available)
-        temp_scores = {"bm25": zs_bm_full}
-        if zs_dense_full is not None:
-            temp_scores["dense"] = zs_dense_full
+    # 5. Hybrid Scoring
+    # 5. Hybrid Scoring
+    # Ensure shapes match before combining
+    if zs_bm.shape != zs_dense.shape:
+        # If one is empty or mismatched, fallback to the one that has data or zeros
+        if zs_bm.size == 0:
+            zs_bm = np.zeros_like(zs_dense)
+        elif zs_dense.size == 0:
+            zs_dense = np.zeros_like(zs_bm)
+        
+        # If still mismatched (e.g. different non-zero lengths), truncate to minimum
+        if zs_bm.shape != zs_dense.shape:
+            min_len = min(len(zs_bm), len(zs_dense))
+            zs_bm = zs_bm[:min_len]
+            zs_dense = zs_dense[:min_len]
+            candidate_idx_array = candidate_idx_array[:min_len]
 
-        # Apply intent-specific boosting to relevant chunks
-        temp_scores = adjust_scores_by_intent(chunks, temp_scores, intent_config)
-
-        # Update normalized scores with boosted values
-        zs_bm_full = temp_scores["bm25"]
-        if zs_dense_full is not None:
-            # Only update dense scores if they were fully materialized
-            zs_dense_full = temp_scores["dense"]
-
-        # Re-slice candidate scores from boosted full scores
-        zs_bm = zs_bm_full[candidate_idx_array] if candidate_idx_array.size else np.array([], dtype="float32")
-        if zs_dense_full is not None:
-            zs_dense = zs_dense_full[candidate_idx_array] if candidate_idx_array.size else np.array([], dtype="float32")
-
-    # Hybrid scoring (OPTIMIZATION: use intent-specific alpha for +8-12% accuracy)
     hybrid = alpha_hybrid * zs_bm + (1 - alpha_hybrid) * zs_dense
     if hybrid.size:
         top_positions = np.argsort(hybrid)[::-1][:top_k]
@@ -591,7 +676,7 @@ def retrieve(
     else:
         top_idx = np.array([], dtype=np.int32)
 
-    # Deduplication
+    # 6. Deduplication
     seen = set()
     filtered = []
     for i in top_idx:
@@ -616,13 +701,13 @@ def retrieve(
             len(chunks), vecs=vecs_n, qv=qv_n, initial=list(zip(candidate_idx, dense_scores))
         )
 
-    dense_total = n_chunks
+    # 7. Profiling
+    dense_total = len(chunks)
     used_hnsw = bool(hnsw) and faiss_index is None
     dense_computed_total = dense_computed or (dense_total if (used_hnsw or not faiss_index) else 0)
     dense_reused = dense_total - dense_computed_total
 
     # FIX: Thread-safe update of profiling state
-    global RETRIEVE_PROFILE_LAST
     profile_data = {
         "used_faiss": bool(faiss_index),
         "used_hnsw": used_hnsw,

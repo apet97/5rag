@@ -12,7 +12,7 @@ Use this guide to configure the Clockify RAG stack across development laptops, C
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `RAG_OLLAMA_URL` | `http://10.127.0.192:11434` | Base URL of the Ollama-compatible LLM host. Override with the local fallback (`http://127.0.0.1:11434`) when running Ollama on your laptop. |
+| `RAG_OLLAMA_URL` | `http://10.127.0.192:11434` | **⚠️  ENVIRONMENT-SPECIFIC** Base URL of the Ollama-compatible LLM host. **Default is company VPN only - change for your deployment!** Common profiles: Local Ollama (`http://127.0.0.1:11434`), Company VPN (`http://10.127.0.192:11434`), Custom endpoint (`http://your-host:port`). |
 | `RAG_CHAT_MODEL` | `qwen2.5:32b` | Primary generation model used for chat/ask flows. |
 | `RAG_EMBED_MODEL` | `nomic-embed-text:latest` | Embedding model served by Ollama when `EMB_BACKEND=ollama`. |
 | `EMB_BACKEND` | `local` | `local` uses SentenceTransformers; `ollama` sends embedding requests to `RAG_OLLAMA_URL`. |

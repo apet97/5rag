@@ -156,11 +156,10 @@ class QueryCache:
                 logger.debug(f"[cache] EVICT question_hash={oldest[:8]} (LRU)")
 
             # Store entry with timestamp
-            # FIX: Deep copy metadata to prevent mutation leaks
-            import copy
-
+            # OPTIMIZATION: Use shallow copy instead of deepcopy for performance.
+            # The metadata dict is created fresh in answer_once and not mutated in place by callers.
             timestamp = time.time()
-            metadata_copy = copy.deepcopy(metadata) if metadata is not None else {}
+            metadata_copy = metadata.copy() if metadata is not None else {}
             metadata_copy["timestamp"] = timestamp
             self.cache[key] = (answer, metadata_copy, timestamp)
 

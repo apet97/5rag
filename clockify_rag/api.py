@@ -32,6 +32,7 @@ from .exceptions import ValidationError
 from .indexing import build
 from .metrics import MetricNames, get_metrics
 from .utils import check_ollama_connectivity
+from .request_context import set_request_id, get_request_id
 
 # Re-export for tests that monkeypatch api.get_rate_limiter
 get_rate_limiter = _get_rate_limiter
@@ -59,33 +60,10 @@ class QueryRequest(BaseModel):
 
         Prevents XSS, injection attacks, and other malicious input.
         """
-        # Strip excessive whitespace
-        v = " ".join(v.split())
-
-        if not v:
-            raise ValueError("Question cannot be empty after whitespace removal")
-
-        # Check for suspicious patterns (basic XSS prevention)
-        suspicious_patterns = [
-            "<script",
-            "javascript:",
-            "onerror=",
-            "onload=",
-            "<iframe",
-            "eval(",
-            "expression(",
-        ]
-
-        v_lower = v.lower()
-        for pattern in suspicious_patterns:
-            if pattern in v_lower:
-                raise ValueError("Invalid content detected in question")
-
-        # Ensure only printable characters (allow unicode for i18n)
-        if not all(c.isprintable() or c.isspace() for c in v):
-            raise ValueError("Question contains non-printable characters")
-
-        return v
+        from .utils import sanitize_question
+        # Use utils.sanitize_question for consistent validation
+        # Pass max_length matching the Field constraint
+        return sanitize_question(v, max_length=10000)
 
 
 class QueryResponse(BaseModel):
@@ -95,6 +73,7 @@ class QueryResponse(BaseModel):
     answer: str
     confidence: Optional[float] = None
     sources: list[str] = Field(default_factory=list, description="Chunk IDs used")
+    request_id: Optional[str] = Field(None, description="Request correlation ID for tracing")
     timestamp: datetime
     processing_time_ms: float
     refused: bool = Field(False, description="True when the answer is a refusal/fallback")
@@ -196,7 +175,7 @@ def create_app() -> FastAPI:
     )
 
     # Add CORS middleware if enabled
-    if config.ALPHA_HYBRID is not None:  # Placeholder check
+    if config.CORS_ENABLED:
         origins = ["*"]
         app.add_middleware(
             CORSMiddleware,
@@ -205,6 +184,33 @@ def create_app() -> FastAPI:
             allow_methods=["*"],
             allow_headers=["*"],
         )
+
+    # Add request ID middleware for tracing
+    @app.middleware("http")
+    async def request_id_middleware(request: Request, call_next):
+        """Add request ID to context and response headers for tracing.
+
+        Extracts request ID from x-request-id header if present, otherwise generates new UUID4.
+        Sets request ID in context (accessible via get_request_id() throughout pipeline).
+        Adds x-request-id header to response for client-side correlation.
+        """
+        # Extract or generate request ID
+        request_id = request.headers.get("x-request-id")
+        request_id = set_request_id(request_id)  # Sets in context, generates if None
+
+        # Log request with ID
+        logger.debug(
+            f"Request received | request_id={request_id} | "
+            f"method={request.method} | path={request.url.path}"
+        )
+
+        # Process request
+        response = await call_next(request)
+
+        # Add request ID to response headers
+        response.headers["x-request-id"] = request_id
+
+        return response
 
     _clear_index_state(app)
 
@@ -360,6 +366,7 @@ def create_app() -> FastAPI:
                 answer=result["answer"],
                 confidence=result.get("confidence"),
                 sources=sources,
+                request_id=get_request_id(),  # Include request ID for tracing
                 timestamp=datetime.now(),
                 processing_time_ms=elapsed_ms,
                 refused=result.get("refused", False),
@@ -369,10 +376,10 @@ def create_app() -> FastAPI:
             )
 
         except ValidationError as e:
-            logger.warning(f"Validation error: {e}")
+            logger.warning(f"Validation error | request_id={get_request_id()} | error={e}")
             raise HTTPException(status_code=400, detail=str(e))
         except Exception as e:
-            logger.error(f"Query error: {e}", exc_info=True)
+            logger.error(f"Query error | request_id={get_request_id()} | error={e}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"Query processing failed: {str(e)}")
 
     # ========================================================================

@@ -32,7 +32,7 @@ High-level overview of the Clockify RAG system design, components, and data flow
 - Live beside the repository, rebuilt deterministically via `ragctl ingest`
 
 **External Services:**
-- Ollama-compatible endpoint at `http://10.127.0.192:11434` (default, overridable)
+- Ollama-compatible endpoint (configurable via `RAG_OLLAMA_URL`, default: `http://10.127.0.192:11434` for company VPN)
 - Local filesystem for corpus Markdown and index artifacts
 - Optional FAISS/HNSW libraries for ANN retrieval (falls back to BM25-only when unavailable)
 
@@ -351,11 +351,12 @@ If not in context, say: "I don't know based on the MD."
 
 ## External Services
 
-**Ollama-compatible LLM host** (default: `http://10.127.0.192:11434`):
+**Ollama-compatible LLM host** (configurable via `RAG_OLLAMA_URL`):
+- Default endpoint: `http://10.127.0.192:11434` (⚠️  Company VPN only - set `RAG_OLLAMA_URL` for your environment)
 - Chat/generation model: `qwen2.5:32b`
 - Embedding model: `nomic-embed-text:latest`
 - Fallback model: `gpt-oss:20b` (automatic on primary failure)
-- Accessible from company VPN (required for remote endpoint)
+- Set to `http://127.0.0.1:11434` for local Ollama or custom endpoint for your deployment
 - All network clients handle timeouts, retries, and are mockable for offline testing
 
 **Local storage**:

@@ -514,7 +514,7 @@ def load_index():
         logger.error(f"   Expected dimension: {config.EMB_DIM}")
         logger.error("")
         logger.error("💡 Solution: Rebuild the index with the current backend:")
-        logger.error("   python3 clockify_support_cli.py build knowledge_full.md")
+        logger.error("   ragctl ingest")
         logger.error("")
         return None
 
@@ -541,7 +541,7 @@ def load_index():
         logger.error("   This usually happens after switching embedding backends without rebuilding.")
         logger.error("")
         logger.error("💡 Solution: Rebuild the index:")
-        logger.error("   python3 clockify_support_cli.py build knowledge_full.md")
+        logger.error("   ragctl ingest")
         logger.error("")
         return None
 

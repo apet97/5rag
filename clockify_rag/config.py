@@ -133,15 +133,28 @@ def get_query_expansions_path() -> Optional[str]:
 
 
 # ====== OLLAMA CONFIG ======
-# 🚀 ZERO CONFIGURATION REQUIRED
-# Default LLM base URL is hardcoded below - works out-of-box with NO env vars!
-# Only set RAG_OLLAMA_URL environment variable if you want to override the default.
-# Default: Company VPN endpoint at http://10.127.0.192:11434
-# Override example: RAG_OLLAMA_URL=http://127.0.0.1:11434 (for local Ollama)
+# 🔧 ENVIRONMENT PROFILES
+# The default endpoint below is for internal company VPN use only.
+# For other environments, set RAG_OLLAMA_URL environment variable.
+#
+# Common profiles:
+#   - Local Ollama:    export RAG_OLLAMA_URL="http://127.0.0.1:11434"
+#   - Company VPN:     export RAG_OLLAMA_URL="http://10.127.0.192:11434"
+#   - Custom endpoint: export RAG_OLLAMA_URL="http://your-host:port"
+#
+# ⚠️  WARNING: The default below is ENVIRONMENT-SPECIFIC!
+# It only works from company VPN. Change it for your deployment environment.
 
-_DEFAULT_RAG_OLLAMA_URL = "http://10.127.0.192:11434"
-DEFAULT_RAG_OLLAMA_URL = _DEFAULT_RAG_OLLAMA_URL
-DEFAULT_LOCAL_OLLAMA_URL = "http://127.0.0.1:11434"
+# Environment profile presets
+ENV_PROFILE_LOCAL = "http://127.0.0.1:11434"
+ENV_PROFILE_VPN_INTERNAL = "http://10.127.0.192:11434"  # Company VPN only
+
+# Backwards compatibility constants (deprecated - use RAG_OLLAMA_URL env var instead)
+DEFAULT_LOCAL_OLLAMA_URL = ENV_PROFILE_LOCAL
+DEFAULT_RAG_OLLAMA_URL = ENV_PROFILE_VPN_INTERNAL  # DEPRECATED: VPN-specific default
+
+# Default endpoint (VPN-specific - override with RAG_OLLAMA_URL for other environments)
+_DEFAULT_RAG_OLLAMA_URL = ENV_PROFILE_VPN_INTERNAL
 
 RAG_OLLAMA_URL = _get_env_value(
     "RAG_OLLAMA_URL",
@@ -433,6 +446,12 @@ RATE_LIMIT_REQUESTS = _parse_env_int("RATE_LIMIT_REQUESTS", 10, min_val=1, max_v
 RATE_LIMIT_WINDOW = _parse_env_int("RATE_LIMIT_WINDOW", 60, min_val=1, max_val=3600)
 
 # ====== API AUTH CONFIG ======
+# API Configuration
+API_HOST = _get_env_value("API_HOST", "127.0.0.1") or "127.0.0.1"
+API_PORT = _parse_env_int("API_PORT", 8000, min_val=1, max_val=65535)
+API_WORKERS = _parse_env_int("API_WORKERS", 4, min_val=1, max_val=64)
+CORS_ENABLED = _get_bool_env("CORS_ENABLED", "1") # Enabled by default
+
 API_AUTH_MODE = (_get_env_value("API_AUTH_MODE", "none") or "none").strip().lower()
 _api_keys_raw = _get_env_value("API_ALLOWED_KEYS", "")
 if _api_keys_raw.strip():

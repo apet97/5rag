@@ -51,14 +51,22 @@ def _cleanup_all_sessions():
 
 
 def _mount_retries(sess: requests.Session, retries: int):
-    """Mount or update HTTP retry adapters with connection pooling (Rank 27).
+    """Mount or update HTTP retry adapters with exponential backoff and connection pooling.
 
-    Rank 27: Explicitly set pool_connections=10 and pool_maxsize=20 for better
+    Uses exponential backoff strategy:
+    - Attempt 1: immediate
+    - Attempt 2: 1.0s delay (backoff_factor * 2^0)
+    - Attempt 3: 2.0s delay (backoff_factor * 2^1)
+    - Attempt 4: 4.0s delay (backoff_factor * 2^2)
+    - etc.
+
+    Connection pooling (Rank 27): pool_connections=10, pool_maxsize=20 for better
     concurrency and reduced latency on concurrent queries (10-20% improvement).
     """
     from requests.adapters import HTTPAdapter
 
-    backoff_factor = 0.5
+    # Exponential backoff: delays will be 1.0s, 2.0s, 4.0s, 8.0s, etc.
+    backoff_factor = 1.0
 
     try:
         from urllib3.util.retry import Retry  # urllib3 v2
@@ -108,8 +116,9 @@ def _mount_retries(sess: requests.Session, retries: int):
     if retries > 0:
         logger.info(
             f"HTTP retry adapter configured: retries={retries}, "
-            f"backoff_factor={backoff_factor}s, "
-            f"status_codes=[429,500,502,503,504]"
+            f"backoff_factor={backoff_factor}s (exponential), "
+            f"status_codes=[429,500,502,503,504], "
+            f"delays=[1.0s, 2.0s, 4.0s, ...]"
         )
     else:
         logger.debug("HTTP retry adapter disabled (retries=0)")

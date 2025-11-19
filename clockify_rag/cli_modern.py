@@ -25,6 +25,7 @@ from .answer import answer_once, answer_to_json
 from .cli import ensure_index_ready, chat_repl
 from .indexing import build
 from .utils import check_ollama_connectivity
+from .api_client import validate_models
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -233,12 +234,33 @@ def doctor(
     console.print(f"{index_emoji} Index Status: {'READY' if index_ready else 'NOT READY (run: ragctl ingest)'}")
     console.print()
 
-    # Ollama Connectivity
+    # Ollama Connectivity & Model Validation
     try:
-        normalized = check_ollama_connectivity(config.RAG_OLLAMA_URL, timeout=3)
-        console.print(f"✅ Ollama: Connected to {normalized}")
+        model_result = validate_models(log_warnings=False)
+        
+        if model_result["server_reachable"]:
+            console.print(f"✅ Ollama: Connected to {config.RAG_OLLAMA_URL}")
+            
+            # Check required models
+            chat_available = model_result["chat_model"]["available"]
+            embed_available = model_result["embed_model"]["available"]
+            fallback_available = model_result["fallback_model"]["available"]
+            
+            console.print(f"  📦 Available models: {len(model_result['models_available'])}")
+            console.print(f"     • Chat model ({config.RAG_CHAT_MODEL}): {'✅' if chat_available else '❌ MISSING'}")
+            console.print(f"     • Embed model ({config.RAG_EMBED_MODEL}): {'✅' if embed_available else '❌ MISSING'}")
+            
+            if config.RAG_FALLBACK_ENABLED:
+                console.print(f"     • Fallback model ({config.RAG_FALLBACK_MODEL}): {'✅' if fallback_available else '⚠️  MISSING'}")
+            
+            if not model_result["all_required_available"]:
+                console.print("\n  ⚠️  Some required models are missing! Run 'ollama pull <model>' to fix.")
+        else:
+            console.print(f"❌ Ollama: Connection failed to {config.RAG_OLLAMA_URL}")
+            console.print("  💡 Check if Ollama is running and accessible.")
+            
     except Exception as e:
-        console.print(f"❌ Ollama: Connection failed - {e}")
+        console.print(f"❌ Ollama: Validation error - {e}")
     console.print()
 
     # Configuration Summary
@@ -279,6 +301,52 @@ def doctor(
         console.print()
 
     console.print("✨ Diagnostics complete!")
+
+
+# ============================================================================
+# Config Command: Show Configuration
+# ============================================================================
+
+
+@app.command()
+def config_show(
+    config_file: Optional[str] = typer.Option(None, "--config-file", help="Config file path"),
+    format: str = typer.Option("yaml", "--format", help="Output format: yaml or json"),
+) -> None:
+    """Show effective configuration with all overrides applied.
+
+    Displays the merged configuration from:
+    1. Default config (config/default.yaml)
+    2. Custom config file (if specified)
+    3. Environment variable overrides (RAG_* prefix)
+
+    Example:
+        ragctl config-show
+        ragctl config-show --config-file config/production.yaml
+        ragctl config-show --format json
+    """
+    from .config_loader import export_effective_config
+
+    try:
+        effective_config = export_effective_config(config_file=config_file)
+
+        if format == "json":
+            console.print(json.dumps(effective_config, indent=2))
+        else:
+            # YAML output
+            try:
+                import yaml
+                console.print(yaml.dump(effective_config, default_flow_style=False, sort_keys=False))
+            except ImportError:
+                console.print("⚠️  PyYAML not installed. Showing JSON format instead:")
+                console.print("    Install with: pip install PyYAML")
+                console.print()
+                console.print(json.dumps(effective_config, indent=2))
+
+    except Exception as e:
+        console.print(f"❌ Failed to load config: {e}")
+        logger.error(f"Config error: {e}", exc_info=True)
+        raise typer.Exit(1)
 
 
 # ============================================================================
@@ -508,43 +576,203 @@ def eval(
 
     try:
         import ragas
-
         console.print(f"✅ RAGAS {ragas.__version__} loaded")
     except ImportError:
-        console.print("❌ RAGAS not installed. Install with: pip install ragas datasets evaluate")
-        raise typer.Exit(1)
+        # RAGAS is optional for internal metrics (MRR/NDCG) but required for LLM-based metrics
+        # For now, we focus on the retrieval metrics implemented in evaluation.py
+        pass
 
     try:
-        if not os.path.exists(questions_file):
-            console.print(f"❌ Questions file not found: {questions_file}")
+        from .evaluation import evaluate_dataset, SUCCESS_THRESHOLDS
+
+        results = evaluate_dataset(
+            dataset_path=questions_file,
+            verbose=True,  # Always verbose for CLI to show progress
+            llm_report=False, # TODO: Add flag for this
+            llm_output=os.path.join(output_dir, "llm_answers.jsonl")
+        )
+
+        # Display Results
+        console.print()
+        console.print(Panel("📈 Evaluation Results", style="bold green"))
+        
+        table = Table(show_header=True, header_style="bold magenta")
+        table.add_column("Metric", style="cyan")
+        table.add_column("Score", justify="right")
+        table.add_column("Threshold", justify="right")
+        table.add_column("Status", justify="center")
+
+        metrics_map = {
+            "mrr_at_10": "MRR@10",
+            "precision_at_5": "Precision@5",
+            "ndcg_at_10": "NDCG@10"
+        }
+
+        success = True
+        for key, label in metrics_map.items():
+            score = results.get(key, 0.0)
+            threshold = SUCCESS_THRESHOLDS.get(key, 0.0)
+            passed = score >= threshold
+            if not passed:
+                success = False
+            status = "✅" if passed else "❌"
+            table.add_row(label, f"{score:.3f}", f"{threshold:.3f}", status)
+
+        console.print(table)
+        console.print()
+
+        if success:
+            console.print("✨ All thresholds passed!")
+        else:
+            console.print("⚠️  Some thresholds were not met.")
             raise typer.Exit(1)
-
-        os.makedirs(output_dir, exist_ok=True)
-
-        # Load index
-        chunks, vecs_n, bm, hnsw = ensure_index_ready(retries=2)
-
-        console.print(f"📥 Loaded index with {len(chunks)} chunks")
-        console.print(f"📊 Metrics: {metrics}")
-
-        # FUTURE FEATURE: RAGAS evaluation loop
-        # Planned implementation:
-        # 1. Load questions from JSONL
-        # 2. Generate answers using answer_once()
-        # 3. Compute RAGAS metrics (faithfulness, answer_relevancy, etc.)
-        # 4. Generate report with scores and analysis
-        # 5. Save to output_dir
-        #
-        # For now, use eval.py script for evaluation.
-        console.print("⚠️  RAGAS evaluation via CLI not yet implemented")
-        console.print("💡 Use eval.py script instead:")
-        console.print(f"   python eval.py --dataset {questions_file}")
-        raise typer.Exit(0)
 
     except Exception as e:
         console.print(f"❌ Evaluation failed: {e}")
         logger.error(f"Eval error: {e}", exc_info=True)
         raise typer.Exit(1)
+
+
+@app.command()
+def benchmark(
+    quick: bool = typer.Option(False, "--quick", help="Quick benchmark (fewer iterations)"),
+    embedding: bool = typer.Option(False, "--embedding", help="Only embedding benchmarks"),
+    retrieval: bool = typer.Option(False, "--retrieval", help="Only retrieval benchmarks"),
+    e2e: bool = typer.Option(False, "--e2e", help="Only end-to-end benchmarks"),
+    output: str = typer.Option("benchmark_results.json", "--output", help="Output JSON file"),
+):
+    """Run performance benchmarks."""
+    import time
+    import json
+    from .config import EMB_BACKEND
+    from .benchmarking import (
+        benchmark_embedding_single,
+        benchmark_embedding_batch,
+        benchmark_embedding_large_batch,
+        benchmark_retrieval_hybrid,
+        benchmark_retrieval_with_mmr,
+        benchmark_e2e_simple,
+        benchmark_e2e_complex,
+        benchmark_chunking,
+    )
+
+    # Adjust iterations for quick mode
+    iter_multiplier = 0.5 if quick else 1.0
+
+    console.print(Panel("⏱️  Clockify RAG Benchmark Suite", style="bold blue"))
+    console.print(f"Embedding backend: {EMB_BACKEND}")
+    console.print(f"Mode: {'Quick' if quick else 'Full'}")
+    console.print()
+
+    # Load index
+    with console.status("[bold green]Loading index..."):
+        chunks, vecs_n, bm, hnsw = ensure_index_ready(retries=2)
+        # We need faiss_index_path if hnsw is None but file exists, 
+        # but ensure_index_ready returns loaded objects.
+        # For benchmarking, we might want to pass the path if we want to test loading?
+        # But the benchmark functions take loaded objects mostly.
+        # Let's check if we can get the path.
+        from .config import FILES
+        faiss_index_path = FILES["faiss_index"] if os.path.exists(FILES["faiss_index"]) else None
+
+    console.print(f"✅ Loaded {len(chunks)} chunks")
+    console.print()
+
+    results = []
+
+    # Embedding benchmarks
+    if not retrieval and not e2e:
+        console.print("[bold cyan]--- Embedding Benchmarks ---[/bold cyan]")
+        if not quick:
+            with console.status("Benchmarking single embedding..."):
+                res = benchmark_embedding_single(chunks, iterations=int(10 * iter_multiplier))
+                results.append(res)
+                console.print(f"✅ {res.name}: {res.summary()['latency_ms']['mean']:.2f}ms")
+
+        with console.status("Benchmarking batch embedding (10)..."):
+            res = benchmark_embedding_batch(chunks, iterations=int(5 * iter_multiplier))
+            results.append(res)
+            console.print(f"✅ {res.name}: {res.summary()['latency_ms']['mean']:.2f}ms")
+
+        if not quick:
+            with console.status("Benchmarking large batch embedding (100)..."):
+                res = benchmark_embedding_large_batch(chunks, iterations=int(3 * iter_multiplier))
+                results.append(res)
+                console.print(f"✅ {res.name}: {res.summary()['latency_ms']['mean']:.2f}ms")
+        console.print()
+
+    # Retrieval benchmarks
+    if not embedding and not e2e:
+        console.print("[bold cyan]--- Retrieval Benchmarks ---[/bold cyan]")
+        with console.status("Benchmarking hybrid retrieval..."):
+            res = benchmark_retrieval_hybrid(chunks, vecs_n, bm, hnsw=hnsw, faiss_index_path=faiss_index_path, iterations=int(20 * iter_multiplier))
+            results.append(res)
+            console.print(f"✅ {res.name}: {res.summary()['latency_ms']['mean']:.2f}ms")
+
+        with console.status("Benchmarking retrieval + MMR..."):
+            res = benchmark_retrieval_with_mmr(chunks, vecs_n, bm, hnsw=hnsw, faiss_index_path=faiss_index_path, iterations=int(20 * iter_multiplier))
+            results.append(res)
+            console.print(f"✅ {res.name}: {res.summary()['latency_ms']['mean']:.2f}ms")
+        console.print()
+
+    # End-to-end benchmarks
+    if not embedding and not retrieval:
+        console.print("[bold cyan]--- End-to-End Benchmarks ---[/bold cyan]")
+        with console.status("Benchmarking simple query..."):
+            res = benchmark_e2e_simple(chunks, vecs_n, bm, hnsw=hnsw, faiss_index_path=faiss_index_path, iterations=int(10 * iter_multiplier))
+            results.append(res)
+            console.print(f"✅ {res.name}: {res.summary()['latency_ms']['mean']:.2f}ms")
+
+        if not quick:
+            with console.status("Benchmarking complex query..."):
+                res = benchmark_e2e_complex(chunks, vecs_n, bm, hnsw=hnsw, faiss_index_path=faiss_index_path, iterations=int(5 * iter_multiplier))
+                results.append(res)
+                console.print(f"✅ {res.name}: {res.summary()['latency_ms']['mean']:.2f}ms")
+        console.print()
+
+    # Chunking benchmark
+    if not embedding and not retrieval and not e2e and not quick:
+        if os.path.exists("knowledge_full.md"):
+            console.print("[bold cyan]--- Chunking Benchmark ---[/bold cyan]")
+            with console.status("Benchmarking chunking..."):
+                res = benchmark_chunking("knowledge_full.md", iterations=5)
+                results.append(res)
+                console.print(f"✅ {res.name}: {res.summary()['latency_ms']['mean']:.2f}ms")
+            console.print()
+
+    # Summary
+    console.print()
+    console.print(Panel("📊 Benchmark Results", style="bold green"))
+    
+    summaries = [r.summary() for r in results]
+    
+    table = Table(show_header=True, header_style="bold magenta")
+    table.add_column("Name", style="cyan")
+    table.add_column("Latency (ms)", justify="right")
+    table.add_column("Throughput (ops/s)", justify="right")
+    table.add_column("Memory (MB)", justify="right")
+
+    for s in summaries:
+        latency = f"{s['latency_ms']['mean']:.2f} ± {s['latency_ms']['stdev']:.2f}"
+        throughput = f"{s['throughput']['ops_per_sec']:.2f}"
+        memory = f"{s['memory_mb']['peak']:.2f}"
+        table.add_row(s['name'], latency, throughput, memory)
+
+    console.print(table)
+
+    # Save to JSON
+    output_data = {
+        "timestamp": time.time(),
+        "backend": EMB_BACKEND,
+        "quick_mode": quick,
+        "results": summaries,
+    }
+
+    with open(output, "w") as f:
+        json.dump(output_data, f, indent=2)
+
+    console.print()
+    console.print(f"✅ Results saved to {output}")
 
 
 # ============================================================================

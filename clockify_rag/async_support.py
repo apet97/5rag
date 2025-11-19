@@ -266,93 +266,40 @@ async def async_answer_once(
     Returns:
         Dict with answer and metadata (same format as answer_once)
     """
-    from .retrieval import retrieve, coverage_ok, pack_snippets
-    from .answer import apply_mmr_diversification
+    from .answer import prepare_context_pipeline, _handle_llm_failure
 
-    t_start = time.time()
-
-    # Retrieve (synchronous for now, retrieval is fast)
-    t0 = time.time()
-    selected, scores = retrieve(
-        question, chunks, vecs_n, bm, top_k=top_k, hnsw=hnsw, retries=retries, faiss_index_path=faiss_index_path
+    # Prepare context (Retrieve -> MMR -> Rerank -> Pack)
+    # Note: Reranking is currently synchronous inside prepare_context_pipeline
+    ctx = prepare_context_pipeline(
+        question, chunks, vecs_n, bm, hnsw, top_k, pack_top, threshold,
+        use_rerank, seed, num_ctx, num_predict, retries, faiss_index_path
     )
-    retrieve_time = time.time() - t0
 
-    # Check coverage
-    if not coverage_ok(selected, scores["dense"], threshold):
-        return {
-            "answer": REFUSAL_STR,
-            "refused": True,
-            "confidence": None,
-            "selected_chunks": [],
-            "packed_chunks": [],
-            "context_block": "",
-            "timing": {
-                "total_ms": (time.time() - t_start) * 1000,
-                "retrieve_ms": retrieve_time * 1000,
-                "mmr_ms": 0,
-                "rerank_ms": 0,
-                "llm_ms": 0,
-            },
-            "metadata": {"retrieval_count": len(selected), "coverage_check": "failed"},
-            "routing": get_routing_action(None, refused=True, critical=False),
-        }
+    if not ctx["success"]:
+        return ctx["failure_response"]
 
-    # Apply MMR diversification
-    t0 = time.time()
-    mmr_selected = apply_mmr_diversification(selected, scores, vecs_n, pack_top)
-    mmr_time = time.time() - t0
+    # Unpack context results
+    context_block = ctx["context_block"]
+    packed_ids = ctx["packed_ids"]
+    used_tokens = ctx["used_tokens"]
+    selected = ctx["selected"]
+    mmr_selected = ctx["mmr_selected"]
+    rerank_applied = ctx["rerank_applied"]
+    rerank_reason = ctx["rerank_reason"]
+    timing = ctx["timing"]
+    question_hash = ctx["question_hash"]
+    t_start = ctx["t_start"]
 
-    # Reranking (synchronous for now)
-    rerank_time = 0.0
-    rerank_applied = False
-    rerank_reason = "disabled"
-    if use_rerank:
-        from .answer import apply_reranking
-
-        t0 = time.time()
-        mmr_selected, rerank_scores, rerank_applied, rerank_reason, rerank_time = apply_reranking(
-            question,
-            chunks,
-            mmr_selected,
-            scores,
-            use_rerank,
-            seed=seed,
-            num_ctx=num_ctx,
-            num_predict=num_predict,
-            retries=retries,
-        )
-
-    # Pack snippets
-    context_block, packed_ids, used_tokens = pack_snippets(chunks, mmr_selected, pack_top=pack_top, num_ctx=num_ctx)
-
-    def _failure(reason: str, error: Exception) -> Dict[str, Any]:
-        total_time = time.time() - t_start
-        return {
-            "answer": REFUSAL_STR,
-            "refused": True,
-            "confidence": None,
-            "selected_chunks": selected,
-            "packed_chunks": mmr_selected,
-            "context_block": context_block,
-            "timing": {
-                "total_ms": total_time * 1000,
-                "retrieve_ms": retrieve_time * 1000,
-                "mmr_ms": mmr_time * 1000,
-                "rerank_ms": rerank_time * 1000,
-                "llm_ms": 0,
-            },
-            "metadata": {
-                "retrieval_count": len(selected),
-                "packed_count": len(packed_ids),
-                "used_tokens": used_tokens,
-                "rerank_applied": rerank_applied,
-                "rerank_reason": rerank_reason,
-                "llm_error": reason,
-                "llm_error_msg": str(error),
-            },
-            "routing": get_routing_action(None, refused=True, critical=True),
-        }
+    def _normalize_chunk_ids(seq: Optional[List]) -> List:
+        if not seq:
+            return []
+        normalized: List = []
+        for item in seq:
+            if isinstance(item, np.generic):
+                normalized.append(item.item())
+            else:
+                normalized.append(item)
+        return normalized
 
     # Generate answer (async)
     try:
@@ -367,10 +314,20 @@ async def async_answer_once(
         )
     except LLMUnavailableError as exc:
         logger.error(f"LLM unavailable during async answer generation: {exc}")
-        return _failure("llm_unavailable", exc)
+        return _handle_llm_failure(
+            "llm_unavailable", exc, question_hash, selected, mmr_selected, context_block,
+            packed_ids, used_tokens, rerank_applied, rerank_reason, t_start, 
+            timing["retrieve_ms"] / 1000, timing["mmr_ms"] / 1000, timing["rerank_ms"] / 1000, 
+            _normalize_chunk_ids
+        )
     except LLMError as exc:
         logger.error(f"LLM error during async answer generation: {exc}")
-        return _failure("llm_error", exc)
+        return _handle_llm_failure(
+            "llm_error", exc, question_hash, selected, mmr_selected, context_block,
+            packed_ids, used_tokens, rerank_applied, rerank_reason, t_start, 
+            timing["retrieve_ms"] / 1000, timing["mmr_ms"] / 1000, timing["rerank_ms"] / 1000, 
+            _normalize_chunk_ids
+        )
 
     total_time = time.time() - t_start
 
@@ -382,14 +339,15 @@ async def async_answer_once(
         "answer": answer,
         "refused": refused,
         "confidence": confidence,
-        "selected_chunks": selected,
-        "packed_chunks": mmr_selected,
+        "selected_chunks": _normalize_chunk_ids(selected),
+        "packed_chunks": _normalize_chunk_ids(mmr_selected),
+        "selected_chunk_ids": _normalize_chunk_ids(packed_ids),
         "context_block": context_block,
         "timing": {
             "total_ms": total_time * 1000,
-            "retrieve_ms": retrieve_time * 1000,
-            "mmr_ms": mmr_time * 1000,
-            "rerank_ms": rerank_time * 1000,
+            "retrieve_ms": timing["retrieve_ms"],
+            "mmr_ms": timing["mmr_ms"],
+            "rerank_ms": timing["rerank_ms"],
             "llm_ms": llm_time * 1000,
         },
         "metadata": {
@@ -398,6 +356,7 @@ async def async_answer_once(
             "used_tokens": used_tokens,
             "rerank_applied": rerank_applied,
             "rerank_reason": rerank_reason,
+            "source_chunk_ids": _normalize_chunk_ids(packed_ids),
         },
         "routing": routing,
     }

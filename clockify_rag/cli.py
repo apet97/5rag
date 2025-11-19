@@ -1,8 +1,15 @@
 """CLI and REPL functions for the Clockify RAG system.
 
 This module contains the interactive REPL, warmup logic, and index loading helpers.
+This module contains the interactive REPL, warmup logic, and index loading helpers.
 Extracted from clockify_support_cli_final.py to reduce file size and improve modularity.
+
+.. warning::
+    This module is DEPRECATED. Use `clockify_rag.cli_modern` (ragctl) instead.
 """
+
+import warnings
+warnings.warn("clockify_rag.cli is deprecated. Use ragctl instead.", DeprecationWarning, stacklevel=2)
 
 import argparse
 import hashlib
@@ -15,7 +22,7 @@ from typing import Tuple, List
 
 from . import config
 from .indexing import build, load_index
-from .utils import _log_config_summary, validate_and_set_config, validate_chunk_config, check_pytorch_mps
+from .utils import _log_config_summary, validate_and_set_config, validate_chunk_config, check_pytorch_mps, check_rosetta
 from .answer import answer_once, answer_to_json
 from .caching import get_query_cache, log_query, get_rate_limiter as _get_rate_limiter
 from .retrieval import set_query_expansion_path, load_query_expansion_dict
@@ -465,6 +472,7 @@ def configure_logging_and_config(args):
         )
         validate_chunk_config()
         check_pytorch_mps()
+        check_rosetta()
     except ValueError as e:
         logger.error(f"CONFIG ERROR: {e}")
         sys.exit(1)

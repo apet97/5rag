@@ -5,6 +5,7 @@ and graceful degradation strategies across all RAG components.
 """
 
 import logging
+import traceback
 from typing import Any, Dict, Optional, Tuple
 from functools import wraps
 
@@ -16,30 +17,112 @@ from .config import (
     DEFAULT_RAG_OLLAMA_URL,
     DEFAULT_LOCAL_OLLAMA_URL,
 )
+from .request_context import get_request_id
 
 
 logger = logging.getLogger(__name__)
 
+# Maximum stack trace length (in characters) to prevent log bloat
+MAX_STACK_TRACE_LENGTH = 2000
 
-def format_error_message(error_type: str, message: str, hint: Optional[str] = None) -> str:
-    """Format a consistent error message with type, message, and optional hint.
+
+def format_stack_trace(exc: Exception, max_length: int = MAX_STACK_TRACE_LENGTH) -> str:
+    """Format exception stack trace with length limit.
+
+    Args:
+        exc: Exception to format
+        max_length: Maximum length of stack trace in characters
+
+    Returns:
+        Formatted and truncated stack trace
+
+    Example:
+        >>> try:
+        ...     raise ValueError("test error")
+        ... except ValueError as e:
+        ...     trace = format_stack_trace(e, max_length=500)
+        ...     print(trace[:50])
+        'Traceback (most recent call last):\n  File...'
+    """
+    try:
+        # Get full stack trace
+        tb_lines = traceback.format_exception(type(exc), exc, exc.__traceback__)
+        full_trace = "".join(tb_lines)
+
+        # Truncate if too long
+        if len(full_trace) > max_length:
+            truncated = full_trace[:max_length]
+            truncated += f"\n... (truncated {len(full_trace) - max_length} chars)"
+            return truncated
+
+        return full_trace
+
+    except Exception as format_exc:
+        # Fallback if stack trace formatting fails
+        return f"[Stack trace formatting failed: {format_exc}]"
+
+
+def format_error_message(
+    error_type: str,
+    message: str,
+    hint: Optional[str] = None,
+    error_code: Optional[str] = None,
+    include_stack_trace: bool = False,
+    exc: Optional[Exception] = None,
+) -> str:
+    """Format a consistent error message with type, message, optional hint, and error code.
 
     Args:
         error_type: Type of error (e.g., "LLM_ERROR", "EMBEDDING_ERROR")
         message: Error message
         hint: Optional hint for resolution
+        error_code: Optional structured error code (e.g., "RAG_E301")
+        include_stack_trace: Whether to include stack trace
+        exc: Exception object (required if include_stack_trace=True)
 
     Returns:
         Formatted error message
+
+    Example:
+        >>> format_error_message(
+        ...     "LLM_ERROR",
+        ...     "Connection failed",
+        ...     hint="Check VPN",
+        ...     error_code="RAG_E301",
+        ...     include_stack_trace=False
+        ... )
+        '[LLM_ERROR] [RAG_E301] Connection failed | request_id=... [hint: Check VPN]'
     """
-    formatted = f"[{error_type}] {message}"
+    request_id = get_request_id()
+
+    # Build message parts
+    parts = [f"[{error_type}]"]
+
+    if error_code:
+        parts.append(f"[{error_code}]")
+
+    parts.append(message)
+
+    # Add request ID for tracing
+    if request_id:
+        parts.append(f"| request_id={request_id}")
+
+    formatted = " ".join(parts)
+
+    # Add hint
     if hint:
         formatted += f" [hint: {hint}]"
+
+    # Add stack trace if requested
+    if include_stack_trace and exc:
+        stack_trace = format_stack_trace(exc)
+        formatted += f"\n\nStack Trace:\n{stack_trace}"
+
     return formatted
 
 
 def handle_llm_errors(func):
-    """Decorator to handle LLM-related errors gracefully."""
+    """Decorator to handle LLM-related errors gracefully with stack traces."""
 
     @wraps(func)
     def wrapper(*args, **kwargs):
@@ -48,13 +131,24 @@ def handle_llm_errors(func):
         except LLMError as e:
             logger.error(
                 format_error_message(
-                    "LLM_ERROR", str(e), f"check RAG_OLLAMA_URL={RAG_OLLAMA_URL} or increase CHAT timeouts"
+                    "LLM_ERROR",
+                    str(e),
+                    hint=f"check RAG_OLLAMA_URL={RAG_OLLAMA_URL} or increase CHAT timeouts",
+                    error_code="RAG_E305",
+                    include_stack_trace=False,
                 )
             )
             raise
         except Exception as e:
             logger.error(
-                format_error_message("LLM_UNEXPECTED", str(e), f"unexpected error in LLM call: {type(e).__name__}")
+                format_error_message(
+                    "LLM_UNEXPECTED",
+                    str(e),
+                    hint=f"unexpected error in LLM call: {type(e).__name__}",
+                    error_code="RAG_E501",
+                    include_stack_trace=True,
+                    exc=e,
+                )
             )
             raise LLMError(f"Unexpected LLM error: {e}") from e
 
@@ -62,7 +156,7 @@ def handle_llm_errors(func):
 
 
 def handle_embedding_errors(func):
-    """Decorator to handle embedding-related errors gracefully."""
+    """Decorator to handle embedding-related errors gracefully with stack traces."""
 
     @wraps(func)
     def wrapper(*args, **kwargs):
@@ -71,14 +165,23 @@ def handle_embedding_errors(func):
         except EmbeddingError as e:
             logger.error(
                 format_error_message(
-                    "EMBEDDING_ERROR", str(e), f"check RAG_OLLAMA_URL={RAG_OLLAMA_URL} or increase EMB timeouts"
+                    "EMBEDDING_ERROR",
+                    str(e),
+                    hint=f"check RAG_OLLAMA_URL={RAG_OLLAMA_URL} or increase EMB timeouts",
+                    error_code="RAG_E202",
+                    include_stack_trace=False,
                 )
             )
             raise
         except Exception as e:
             logger.error(
                 format_error_message(
-                    "EMBEDDING_UNEXPECTED", str(e), f"unexpected error in embedding: {type(e).__name__}"
+                    "EMBEDDING_UNEXPECTED",
+                    str(e),
+                    hint=f"unexpected error in embedding: {type(e).__name__}",
+                    error_code="RAG_E501",
+                    include_stack_trace=True,
+                    exc=e,
                 )
             )
             raise EmbeddingError(f"Unexpected embedding error: {e}") from e
@@ -96,7 +199,7 @@ def handle_index_errors(func):
         except IndexLoadError as e:
             logger.error(
                 format_error_message(
-                    "INDEX_ERROR", str(e), "run 'python clockify_support_cli.py build <kb_path>' to rebuild"
+                    "INDEX_ERROR", str(e), "run 'ragctl ingest' to rebuild"
                 )
             )
             raise

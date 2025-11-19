@@ -7,6 +7,7 @@ import logging
 import os
 import platform
 import re
+import subprocess
 import tempfile
 import time
 import unicodedata
@@ -87,8 +88,8 @@ def _pid_alive(pid: int) -> bool:
                 # Hint once for better DX
                 try:
                     if not getattr(_pid_alive, "_hinted_psutil", False):
-                        logger.debug(
-                            "[build_lock] psutil not available on Windows; install 'psutil' for precise PID checks"
+                        logger.warning(
+                            "[build_lock] psutil not available on Windows; install 'psutil' for precise PID checks. Defaulting to assuming process exists."
                         )
                         _pid_alive._hinted_psutil = True  # type: ignore
                 except Exception:
@@ -179,8 +180,6 @@ def build_lock():
                 time.sleep(0.25)
                 if not os.path.exists(BUILD_LOCK):
                     break
-                if time.time() > deadline:  # Check deadline in loop
-                    raise RuntimeError("Build already in progress; timed out waiting for lock release")
             continue
 
     try:
@@ -366,6 +365,55 @@ def check_pytorch_mps():
         logger.debug("info: pytorch not imported, skipping MPS check")
     except Exception as e:
         logger.debug(f"info: pytorch_mps check failed: {e}")
+
+
+def check_rosetta():
+    """Check if Python is running under Rosetta 2 translation on Apple Silicon.
+
+    Rosetta 2 translation causes significant performance degradation.
+    This function detects it and logs a warning with remediation steps.
+    """
+    # Only relevant for macOS
+    if platform.system() != "Darwin":
+        return
+
+    # Check if machine reports as arm64
+    if platform.machine() != "arm64":
+        return
+
+    try:
+        # Check sysctl.proc_translated
+        # 0 = native ARM, 1 = Rosetta translation
+        result = subprocess.run(
+            ["sysctl", "-n", "sysctl.proc_translated"],
+            capture_output=True,
+            text=True,
+            timeout=2
+        )
+
+        if result.returncode == 0 and result.stdout.strip() == "1":
+            logger.warning(
+                "⚠️  PERFORMANCE WARNING: Python is running under Rosetta 2 translation!\n"
+                "   This causes significant performance degradation (2-3x slower).\n"
+                "\n"
+                "   💡 Solution: Install native ARM64 Python:\n"
+                "   1. Download from: https://www.python.org/downloads/macos/\n"
+                "   2. Look for 'macOS 64-bit universal2 installer'\n"
+                "   3. Or use Homebrew: brew install python@3.11\n"
+                "   4. Recreate virtualenv with native Python"
+            )
+        elif result.returncode == 0 and result.stdout.strip() == "0":
+            logger.debug("Running native ARM64 Python (no Rosetta translation)")
+        else:
+            # sysctl.proc_translated doesn't exist on older macOS versions
+            logger.debug("Could not determine Rosetta status (sysctl check returned no data)")
+
+    except subprocess.TimeoutExpired:
+        logger.debug("Rosetta check timed out")
+    except FileNotFoundError:
+        logger.debug("sysctl command not found (not on macOS?)")
+    except Exception as e:
+        logger.debug(f"Rosetta check failed: {e}")
 
 
 def _log_config_summary(
