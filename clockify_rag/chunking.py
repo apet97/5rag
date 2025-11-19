@@ -86,6 +86,10 @@ def sliding_chunks(text: str, maxc: int = None, overlap: int = None) -> list:
     if overlap is None:
         overlap = CHUNK_OVERLAP
 
+    # Prevent infinite loop: overlap must be less than maxc
+    if overlap >= maxc:
+        raise ValueError("overlap must be less than maxc")
+
     if len(text) <= maxc:
         return [text]
 
@@ -291,6 +295,10 @@ def character_chunking(text: str, maxc: int, overlap: int) -> list:
     Returns:
         List of character-based chunks
     """
+    # Prevent infinite loop: overlap must be less than maxc
+    if overlap >= maxc:
+        raise ValueError("overlap must be less than maxc")
+
     if not text.strip():
         return []
 
@@ -324,47 +332,64 @@ def yield_sentence_aware_chunk(text: str, maxc: int, overlap: int) -> list:
     return character_chunking(text, maxc, overlap)
 
 
-def build_chunks(md_path: str) -> list:
-    """Parse and chunk markdown with enhanced metadata extraction.
+def build_chunks(md_or_text: str, source: str = None, maxc: int = None, overlap: int = None) -> list:
+    """Parse and chunk markdown/text with enhanced metadata extraction.
+
+    Accepts either a path to a markdown file or a raw text string. If 'source' is provided,
+    it will be used as the chunk['source'] value (tests expect this).
 
     Args:
-        md_path: Path to the markdown file to chunk
+        md_or_text: Path to markdown file or raw text string
+        source: Optional source identifier (e.g., filename) to populate chunk['source']
+        maxc: Maximum characters per chunk (defaults to CHUNK_CHARS)
+        overlap: Overlap in characters (defaults to CHUNK_OVERLAP)
 
     Returns:
         List of chunk dictionaries with enhanced metadata
     """
-    raw = pathlib.Path(md_path).read_text(encoding="utf-8", errors="ignore")
+    if maxc is None:
+        maxc = CHUNK_CHARS
+    if overlap is None:
+        overlap = CHUNK_OVERLAP
+
+    # Read file if md_or_text is an existing path, otherwise treat as raw text
+    p = pathlib.Path(md_or_text)
+    if p.exists() and p.is_file():
+        raw = p.read_text(encoding="utf-8", errors="ignore")
+        doc_path = str(p)
+        inferred_source = p.name
+    else:
+        raw = md_or_text or ""
+        doc_path = None
+        inferred_source = None
+
     chunks = []
 
     for art in parse_articles(raw):
         sects = split_by_headings(art["body"]) or [art["body"]]
 
         for sect_idx, sect in enumerate(sects):
-            # Extract the section header/title from the content
-            head = sect.splitlines()[0] if sect else art["title"]
+            # Determine a sensible header/title
+            head = sect.splitlines()[0] if sect and sect.splitlines() else art.get("title", "")
 
-            # Parse the section for any H3 or H4 headers as subsection indicators
             subsection_headers = extract_subsection_headers(sect)
-
-            # Create chunks for this section
-            text_chunks = sliding_chunks(sect)
+            text_chunks = sliding_chunks(sect, maxc=maxc, overlap=overlap)
 
             for chunk_idx, piece in enumerate(text_chunks):
-                # Create a meaningful ID that includes document structure info
-                doc_name = pathlib.Path(md_path).stem
+                doc_name = pathlib.Path(doc_path).stem if doc_path else (inferred_source or (source or "inmemory"))
                 cid = f"{doc_name}_{sect_idx}_{chunk_idx}_{str(uuid.uuid4())[:8]}"
 
-                # Extract additional metadata
                 metadata = extract_metadata(piece)
 
                 chunk_obj = {
                     "id": cid,
-                    "title": norm_ws(art["title"]),
-                    "url": art["url"],
+                    "title": norm_ws(art.get("title", "")),
+                    "url": art.get("url", ""),
                     "section": norm_ws(head),
                     "subsection": subsection_headers[0] if subsection_headers else "",
                     "text": piece,
-                    "doc_path": str(md_path),
+                    "source": source if source is not None else (inferred_source or doc_name),
+                    "doc_path": str(doc_path) if doc_path else "",
                     "doc_name": doc_name,
                     "section_idx": sect_idx,
                     "chunk_idx": chunk_idx,

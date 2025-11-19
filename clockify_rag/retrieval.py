@@ -27,7 +27,6 @@ from .exceptions import LLMError, ValidationError
 from .indexing import bm25_scores, get_faiss_index
 from .utils import tokenize  # FIX (Error #17): Import tokenize from utils instead of duplicating
 from .intent_classification import classify_intent, get_intent_metadata, adjust_scores_by_intent
-from .request_context import get_request_id
 
 logger = logging.getLogger(__name__)
 
@@ -369,6 +368,37 @@ def normalize_scores_zscore(arr: np.ndarray) -> np.ndarray:
     if s == 0:
         return a  # Preserve original when no variance
     return (a - m) / s
+
+
+def normalize_scores_minmax(arr: np.ndarray) -> np.ndarray:
+    """Min-max normalize to [0, 1] in a robust way.
+
+    Rules:
+    - Empty input -> return empty array
+    - Constant array (max == min) -> return zeros
+    - Non-finite entries (NaN/Inf) are handled: finite values are normalized,
+      non-finite outputs are set to 0.0 to avoid propagating NaNs/Inf.
+    """
+    a = np.asarray(arr, dtype="float32")
+    if a.size == 0:
+        return a
+
+    # Compute min/max over finite values only
+    finite_mask = np.isfinite(a)
+    if not np.any(finite_mask):
+        # no finite values -> return zeros
+        return np.zeros_like(a)
+
+    minv = np.nanmin(a)
+    maxv = np.nanmax(a)
+
+    if maxv == minv:
+        return np.zeros_like(a)
+
+    res = (a - minv) / (maxv - minv)
+    # Replace non-finite outputs (from original NaN/Inf) with 0.0
+    res = np.where(np.isfinite(res), res, 0.0).astype("float32")
+    return res
 
 
 def embed_query(question: str, retries=0) -> np.ndarray:
@@ -1055,6 +1085,7 @@ __all__ = [
     "expand_query",
     "embed_query",
     "normalize_scores_zscore",
+    "normalize_scores_minmax",
     "DenseScoreStore",
     "retrieve",
     "rerank_with_llm",

@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from clockify_rag.retrieval import (
     normalize_scores_zscore,
+    normalize_scores_minmax,
     DenseScoreStore,
 )
 
@@ -180,7 +181,6 @@ class TestScoreNormalization:
         # Should handle gracefully (return zeros or original)
         assert len(normalized) == len(scores)
 
-    @pytest.mark.skip(reason="normalize_scores_minmax not yet implemented")
     def test_minmax_normalization_basic(self):
         """Test min-max normalization."""
         scores = np.array([10.0, 20.0, 30.0, 40.0, 50.0])
@@ -194,7 +194,6 @@ class TestScoreNormalization:
         assert abs(normalized[0] - 0.0) < 0.01
         assert abs(normalized[-1] - 1.0) < 0.01
 
-    @pytest.mark.skip(reason="normalize_scores_minmax not yet implemented")
     def test_minmax_normalization_negative_scores(self):
         """Test min-max with negative scores."""
         scores = np.array([-10.0, 0.0, 10.0, 20.0])
@@ -205,7 +204,6 @@ class TestScoreNormalization:
         assert np.min(normalized) >= 0.0
         assert np.max(normalized) <= 1.0
 
-    @pytest.mark.skip(reason="normalize_scores_minmax not yet implemented")
     def test_minmax_normalization_constant_scores(self):
         """Test min-max with all same scores."""
         scores = np.array([5.0, 5.0, 5.0])
@@ -220,20 +218,20 @@ class TestScoreNormalization:
         scores = np.array([])
 
         zscore_result = normalize_scores_zscore(scores)
-        # minmax_result = normalize_scores_minmax(scores)  # Not yet implemented
+        minmax_result = normalize_scores_minmax(scores)
 
         assert len(zscore_result) == 0
-        # assert len(minmax_result) == 0  # Not yet implemented
+        assert len(minmax_result) == 0
 
     def test_normalization_single_score(self):
         """Test normalization with single score."""
         scores = np.array([7.5])
 
         zscore_result = normalize_scores_zscore(scores)
-        # minmax_result = normalize_scores_minmax(scores)  # Not yet implemented
+        minmax_result = normalize_scores_minmax(scores)
 
         assert len(zscore_result) == 1
-        # assert len(minmax_result) == 1  # Not yet implemented
+        assert len(minmax_result) == 1
 
 
 @pytest.mark.skip(reason="fuse_scores_rrf function not yet implemented")
@@ -400,7 +398,6 @@ class TestHybridScoreFusion:
 class TestRetrievalEdgeCases:
     """Test edge cases in retrieval ranking."""
 
-    @pytest.mark.skip(reason="normalize_scores_minmax not yet implemented")
     def test_retrieval_with_all_zero_scores(self):
         """Test retrieval when all scores are zero."""
         scores = np.array([0.0, 0.0, 0.0])
@@ -410,7 +407,6 @@ class TestRetrievalEdgeCases:
         # Should handle gracefully
         assert len(normalized) == len(scores)
 
-    @pytest.mark.skip(reason="normalize_scores_minmax not yet implemented")
     def test_retrieval_with_nan_scores(self):
         """Test handling of NaN in scores."""
         scores = np.array([0.9, np.nan, 0.5])
@@ -424,7 +420,6 @@ class TestRetrievalEdgeCases:
             # Acceptable to raise error for invalid input
             pass
 
-    @pytest.mark.skip(reason="normalize_scores_minmax not yet implemented")
     def test_retrieval_with_inf_scores(self):
         """Test handling of infinity in scores."""
         scores = np.array([0.9, np.inf, 0.5])
